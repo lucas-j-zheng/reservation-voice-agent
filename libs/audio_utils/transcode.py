@@ -1,6 +1,6 @@
 """
 Audio Transcoding Utilities
-Handles conversion between Twilio's μ-law 8kHz and Gemini's LPCM16 16kHz formats.
+Handles conversion between Twilio's μ-law 8kHz and Gemini's LPCM16 formats (16kHz/24kHz).
 """
 
 import numpy as np
@@ -132,3 +132,39 @@ def resample_16k_to_8k(samples: np.ndarray) -> np.ndarray:
     """
     # Simple decimation: take every other sample
     return samples[::2].copy()
+
+
+def resample_24k_to_8k(samples: np.ndarray) -> np.ndarray:
+    """
+    Resample from 24kHz to 8kHz using decimation.
+
+    Args:
+        samples: Input samples at 24kHz
+
+    Returns:
+        Output samples at 8kHz
+    """
+    # Take every 3rd sample (24kHz / 3 = 8kHz)
+    return samples[::3].copy()
+
+
+def transcode_pcm_24k_to_mulaw(pcm_audio: bytes) -> bytes:
+    """
+    Convert 16-bit LPCM 24kHz audio to μ-law 8kHz.
+
+    Args:
+        pcm_audio: 16-bit signed LPCM audio bytes (24kHz)
+
+    Returns:
+        Raw μ-law encoded audio bytes (8kHz)
+    """
+    # Parse 16-bit PCM
+    pcm_samples = np.frombuffer(pcm_audio, dtype=np.int16)
+
+    # Resample 24kHz -> 8kHz
+    resampled = resample_24k_to_8k(pcm_samples)
+
+    # Encode to μ-law
+    mulaw_bytes = bytes([_mulaw_encode_sample(int(s)) for s in resampled])
+
+    return mulaw_bytes

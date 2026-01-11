@@ -3,8 +3,10 @@ Twilio Media Stream Handler
 Manages WebSocket connection with Twilio for real-time audio.
 """
 
+import asyncio
 import json
 import base64
+import logging
 from fastapi import WebSocket
 
 import sys
@@ -14,8 +16,10 @@ from pathlib import Path
 libs_path = Path(__file__).parent.parent.parent.parent.parent / "libs"
 sys.path.insert(0, str(libs_path))
 
-from audio_utils import transcode_mulaw_to_pcm, transcode_pcm_to_mulaw
+from audio_utils import transcode_mulaw_to_pcm, transcode_pcm_24k_to_mulaw
 from src.brain.gemini_client import GeminiLiveClient
+
+logger = logging.getLogger(__name__)
 
 
 class TwilioMediaHandler:
@@ -23,15 +27,17 @@ class TwilioMediaHandler:
     Handles Twilio Media Stream WebSocket protocol.
 
     Twilio sends 8kHz μ-law audio, we transcode to 16kHz LPCM16 for Gemini.
-    Gemini responds with 16kHz LPCM16, we transcode back to 8kHz μ-law for Twilio.
+    Gemini responds with 24kHz LPCM16, we transcode back to 8kHz μ-law for Twilio.
     """
 
     def __init__(self, websocket: WebSocket):
         self.websocket = websocket
         self.stream_sid: str | None = None
         self.call_sid: str | None = None
-        self._outbound_buffer: list[bytes] = []
+        self._outbound_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._is_speaking = False
+        self._running = False
+        self._tasks: list[asyncio.Task] = []
 
     async def handle_stream(self, gemini: GeminiLiveClient) -> None:
         """
@@ -39,14 +45,24 @@ class TwilioMediaHandler:
         Processes incoming audio and routes to Gemini.
         """
         await gemini.connect()
+        self._running = True
 
-        # Register callbacks
-        gemini.on_audio(self._queue_outbound_audio)
+        # Start background tasks
+        self._tasks = [
+            asyncio.create_task(self._gemini_receive_loop(gemini)),
+            asyncio.create_task(self._outbound_audio_loop()),
+        ]
 
         try:
             async for message in self.websocket.iter_text():
                 await self._process_message(message, gemini)
         finally:
+            self._running = False
+            # Cancel background tasks
+            for task in self._tasks:
+                task.cancel()
+            # Wait for tasks to complete
+            await asyncio.gather(*self._tasks, return_exceptions=True)
             await gemini.close()
 
     async def _process_message(self, message: str, gemini: GeminiLiveClient) -> None:
@@ -82,17 +98,68 @@ class TwilioMediaHandler:
 
     async def _handle_barge_in(self, gemini: GeminiLiveClient) -> None:
         """Handle user interruption (barge-in)."""
-        self._outbound_buffer.clear()
+        # Clear the outbound queue
+        while not self._outbound_queue.empty():
+            try:
+                self._outbound_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
         self._is_speaking = False
         await gemini.interrupt()
-        # Send clear message to Twilio
+        # Send clear message to Twilio to stop playback
         await self._send_clear()
+        logger.info("Barge-in handled: cleared queue and interrupted Gemini")
 
-    def _queue_outbound_audio(self, pcm_audio: bytes) -> None:
-        """Queue audio for sending to Twilio."""
-        mulaw_audio = transcode_pcm_to_mulaw(pcm_audio)
-        self._outbound_buffer.append(mulaw_audio)
-        self._is_speaking = True
+    async def _gemini_receive_loop(self, gemini: GeminiLiveClient) -> None:
+        """Background task to receive audio from Gemini and queue for Twilio."""
+        logger.info("Starting Gemini receive loop")
+        try:
+            async for pcm_audio in gemini.receive_audio():
+                if not self._running:
+                    break
+
+                # Transcode 24kHz PCM to 8kHz μ-law for Twilio
+                mulaw_audio = transcode_pcm_24k_to_mulaw(pcm_audio)
+
+                # Queue for sending to Twilio
+                await self._outbound_queue.put(mulaw_audio)
+                self._is_speaking = True
+
+        except asyncio.CancelledError:
+            logger.info("Gemini receive loop cancelled")
+        except Exception as e:
+            logger.error(f"Error in Gemini receive loop: {e}")
+
+    async def _outbound_audio_loop(self) -> None:
+        """Background task to send queued audio to Twilio."""
+        logger.info("Starting outbound audio loop")
+        try:
+            while self._running:
+                try:
+                    # Wait for audio with timeout to allow checking _running
+                    audio = await asyncio.wait_for(
+                        self._outbound_queue.get(),
+                        timeout=0.1
+                    )
+                    await self.send_audio(audio)
+                except asyncio.TimeoutError:
+                    continue
+
+            # Drain any remaining audio in queue
+            while not self._outbound_queue.empty():
+                try:
+                    audio = self._outbound_queue.get_nowait()
+                    await self.send_audio(audio)
+                except asyncio.QueueEmpty:
+                    break
+
+        except asyncio.CancelledError:
+            logger.info("Outbound audio loop cancelled")
+        except Exception as e:
+            logger.error(f"Error in outbound audio loop: {e}")
+        finally:
+            self._is_speaking = False
 
     async def send_audio(self, audio: bytes) -> None:
         """Send audio chunk to Twilio."""

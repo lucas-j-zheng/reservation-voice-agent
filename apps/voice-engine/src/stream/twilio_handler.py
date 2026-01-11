@@ -7,7 +7,9 @@ import asyncio
 import json
 import base64
 import logging
+import os
 from fastapi import WebSocket
+from supabase import create_client, Client
 
 import sys
 from pathlib import Path
@@ -18,8 +20,19 @@ sys.path.insert(0, str(libs_path))
 
 from audio_utils import transcode_mulaw_to_pcm, transcode_pcm_24k_to_mulaw
 from src.brain.gemini_client import GeminiLiveClient
+from src.tools.save_booking import save_booking
 
 logger = logging.getLogger(__name__)
+
+
+def get_supabase_client() -> Client | None:
+    """Get Supabase client instance."""
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_KEY")
+    if not url or not key:
+        logger.warning("SUPABASE_URL or SUPABASE_SERVICE_KEY not set - database disabled")
+        return None
+    return create_client(url, key)
 
 
 class TwilioMediaHandler:
@@ -30,14 +43,17 @@ class TwilioMediaHandler:
     Gemini responds with 24kHz LPCM16, we transcode back to 8kHz μ-law for Twilio.
     """
 
-    def __init__(self, websocket: WebSocket):
+    def __init__(self, websocket: WebSocket, db: Client | None = None):
         self.websocket = websocket
         self.stream_sid: str | None = None
         self.call_sid: str | None = None
+        self.call_id: str | None = None  # Database record ID
+        self._db = db or get_supabase_client()
         self._outbound_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._is_speaking = False
         self._running = False
         self._tasks: list[asyncio.Task] = []
+        self._booking_saved = False  # Track if booking was saved
 
     async def handle_stream(self, gemini: GeminiLiveClient) -> None:
         """
@@ -46,6 +62,9 @@ class TwilioMediaHandler:
         """
         await gemini.connect()
         self._running = True
+
+        # Register tool callback to handle save_booking calls from Gemini
+        gemini.on_tool_call(self._handle_tool_call)
 
         # Start background tasks
         self._tasks = [
@@ -79,6 +98,9 @@ class TwilioMediaHandler:
             self.stream_sid = data["start"]["streamSid"]
             self.call_sid = data["start"]["callSid"]
 
+            # Create call record in database
+            await self._create_call_record()
+
         elif event == "media":
             # Incoming audio from caller
             payload = data["media"]["payload"]
@@ -93,8 +115,80 @@ class TwilioMediaHandler:
             await gemini.send_audio(pcm_audio)
 
         elif event == "stop":
-            # Stream ended
-            pass
+            # Stream ended - update call status
+            await self._update_call_status()
+
+    async def _create_call_record(self) -> None:
+        """Create a call record in the database."""
+        if not self._db:
+            logger.warning("Database not available - skipping call record creation")
+            return
+
+        if not self.call_sid:
+            logger.warning("No call_sid available - skipping call record creation")
+            return
+
+        try:
+            result = self._db.table("calls").insert({
+                "twilio_sid": self.call_sid,
+                "status": "ongoing",
+            }).execute()
+
+            if result.data:
+                self.call_id = result.data[0]["id"]
+                logger.info(f"Created call record: {self.call_id} for twilio_sid: {self.call_sid}")
+            else:
+                logger.error("Failed to create call record - no data returned")
+
+        except Exception as e:
+            logger.error(f"Error creating call record: {e}")
+
+    def _handle_tool_call(self, tool_name: str, tool_args: dict) -> None:
+        """
+        Handle tool calls from Gemini.
+        Called when Gemini invokes a registered tool (e.g., save_booking).
+        """
+        logger.info(f"Tool call received: {tool_name} with args: {tool_args}")
+
+        if tool_name == "save_booking":
+            # Run async save_booking in background
+            asyncio.create_task(self._save_booking_async(tool_args))
+        else:
+            logger.warning(f"Unknown tool call: {tool_name}")
+
+    async def _save_booking_async(self, booking_args: dict) -> None:
+        """Execute save_booking asynchronously."""
+        if not self.call_id:
+            logger.error("Cannot save booking: no call_id available")
+            return
+
+        try:
+            result = await save_booking(self.call_id, booking_args)
+            self._booking_saved = True
+            logger.info(f"Booking saved successfully: {result}")
+        except Exception as e:
+            logger.error(f"Error saving booking: {e}")
+
+    async def _update_call_status(self) -> None:
+        """Update call status when stream ends."""
+        if not self._db:
+            logger.warning("Database not available - skipping status update")
+            return
+
+        if not self.call_id:
+            logger.warning("No call_id available - skipping status update")
+            return
+
+        # Determine final status based on whether booking was saved
+        final_status = "completed" if self._booking_saved else "failed"
+
+        try:
+            self._db.table("calls").update({
+                "status": final_status,
+            }).eq("id", self.call_id).execute()
+            logger.info(f"Updated call {self.call_id} status to: {final_status}")
+        except Exception as e:
+            logger.error(f"Error updating call status: {e}")
 
     async def _handle_barge_in(self, gemini: GeminiLiveClient) -> None:
         """Handle user interruption (barge-in)."""

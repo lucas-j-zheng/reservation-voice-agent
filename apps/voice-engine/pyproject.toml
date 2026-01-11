@@ -1,0 +1,35 @@
+[project]
+name = "voice-engine"
+version = "0.1.0"
+description = "AI Voice Agent for Restaurant Reservations"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Core
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=13.0",
+    # Google AI
+    "google-genai>=1.0.0",
+    # Database
+    "supabase>=2.0.0",
+    "asyncpg>=0.30.0",
+    # Redis for real-time state
+    "redis>=5.0.0",
+    # Audio processing
+    "numpy>=2.0.0",
+    # Environment
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]

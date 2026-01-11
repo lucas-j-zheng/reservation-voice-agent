@@ -60,11 +60,18 @@ Polyglot Monorepo layout. Do not deviate from this directory structure even for 
 
 ## Live Data Flow (MVP Logic)
 
+```
+Phone → Twilio (8kHz μ-law) → transcode → Gemini (16kHz PCM)
+                                              ↓
+Phone ← Twilio (8kHz μ-law) ← transcode ← Gemini (24kHz PCM)
+```
+
 1. **Ingress:** Twilio forks 8kHz μ-law audio to `apps/voice-engine`
-2. **Transcode:** `libs/audio-utils` converts to 16kHz LPCM16 (Gemini's native format)
-3. **Brain:** `apps/voice-engine/src/brain` streams audio to Gemini
-4. **Barge-in:** If Twilio sends a start event while the AI is speaking, the voice-engine clears the outbound audio buffer instantly
-5. **Completion:** Upon hearing a confirmation, Gemini triggers `tools/save_booking.py`
+2. **Transcode In:** `libs/audio-utils` converts 8kHz μ-law → 16kHz LPCM16 (Gemini input format)
+3. **Brain:** `apps/voice-engine/src/brain` streams audio to Gemini Live API
+4. **Transcode Out:** Gemini responds with 24kHz LPCM16 → converted to 8kHz μ-law for Twilio
+5. **Barge-in:** If user speaks while AI is talking, voice-engine clears outbound queue and interrupts Gemini
+6. **Completion:** Upon hearing a confirmation, Gemini triggers `tools/save_booking.py`
 
 ---
 

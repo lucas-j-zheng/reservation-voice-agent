@@ -8,7 +8,9 @@ import json
 import base64
 import logging
 import os
+from typing import Literal
 from fastapi import WebSocket
+from pydantic import BaseModel, ValidationError
 from supabase import create_client, Client
 
 import sys
@@ -23,6 +25,45 @@ from src.brain.gemini_client import GeminiLiveClient
 from src.tools.save_booking import save_booking
 
 logger = logging.getLogger(__name__)
+
+
+# Pydantic models for Twilio WebSocket message validation
+class TwilioStartData(BaseModel):
+    """Data payload for 'start' event."""
+    streamSid: str
+    callSid: str
+
+
+class TwilioMediaData(BaseModel):
+    """Data payload for 'media' event."""
+    payload: str  # Base64 encoded audio
+
+
+class TwilioStartMessage(BaseModel):
+    """Twilio 'start' event message."""
+    event: Literal["start"]
+    start: TwilioStartData
+
+
+class TwilioMediaMessage(BaseModel):
+    """Twilio 'media' event message."""
+    event: Literal["media"]
+    media: TwilioMediaData
+
+
+class TwilioConnectedMessage(BaseModel):
+    """Twilio 'connected' event message."""
+    event: Literal["connected"]
+
+
+class TwilioStopMessage(BaseModel):
+    """Twilio 'stop' event message."""
+    event: Literal["stop"]
+
+
+class TwilioBaseMessage(BaseModel):
+    """Base message to extract event type."""
+    event: str
 
 
 def get_supabase_client() -> Client | None:
@@ -85,26 +126,54 @@ class TwilioMediaHandler:
             await gemini.close()
 
     async def _process_message(self, message: str, gemini: GeminiLiveClient) -> None:
-        """Process a single Twilio WebSocket message."""
-        data = json.loads(message)
-        event = data.get("event")
+        """Process a single Twilio WebSocket message with validation."""
+        try:
+            data = json.loads(message)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in WebSocket message: {e}")
+            return
+
+        # Extract event type first
+        try:
+            base_msg = TwilioBaseMessage.model_validate(data)
+            event = base_msg.event
+        except ValidationError as e:
+            logger.error(f"Invalid message format (missing event): {e}")
+            return
 
         if event == "connected":
             # Connection established
-            pass
+            try:
+                TwilioConnectedMessage.model_validate(data)
+                logger.info("Twilio WebSocket connected")
+            except ValidationError as e:
+                logger.warning(f"Connected event validation warning: {e}")
 
         elif event == "start":
             # Stream started - capture metadata
-            self.stream_sid = data["start"]["streamSid"]
-            self.call_sid = data["start"]["callSid"]
+            try:
+                msg = TwilioStartMessage.model_validate(data)
+                self.stream_sid = msg.start.streamSid
+                self.call_sid = msg.start.callSid
+                logger.info(f"Stream started: {self.stream_sid}, call: {self.call_sid}")
 
-            # Create call record in database
-            await self._create_call_record()
+                # Create call record in database
+                await self._create_call_record()
+            except ValidationError as e:
+                logger.error(f"Invalid start message: {e}")
+                return
 
         elif event == "media":
             # Incoming audio from caller
-            payload = data["media"]["payload"]
-            mulaw_audio = base64.b64decode(payload)
+            try:
+                msg = TwilioMediaMessage.model_validate(data)
+                mulaw_audio = base64.b64decode(msg.media.payload)
+            except ValidationError as e:
+                logger.error(f"Invalid media message: {e}")
+                return
+            except Exception as e:
+                logger.error(f"Error decoding audio payload: {e}")
+                return
 
             # Check for barge-in
             if self._is_speaking:
@@ -116,7 +185,16 @@ class TwilioMediaHandler:
 
         elif event == "stop":
             # Stream ended - update call status
-            await self._update_call_status()
+            try:
+                TwilioStopMessage.model_validate(data)
+                logger.info("Stream stopped")
+                await self._update_call_status()
+            except ValidationError as e:
+                logger.warning(f"Stop event validation warning: {e}")
+                await self._update_call_status()
+
+        else:
+            logger.debug(f"Ignoring unknown event type: {event}")
 
     async def _create_call_record(self) -> None:
         """Create a call record in the database."""

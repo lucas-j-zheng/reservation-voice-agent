@@ -123,17 +123,13 @@ docker compose -f infrastructure/docker/docker-compose.yml down
 ```bash
 cd apps/voice-engine
 
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (creates .venv automatically)
+uv sync
 
 # Run the server
-python main.py
+uv run python main.py
 # or with uvicorn for hot reload:
-uvicorn main:app --reload --port 8000
+uv run uvicorn main:app --reload --port 8000
 ```
 
 ### Dashboard (Next.js)

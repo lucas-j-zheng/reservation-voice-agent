@@ -7,11 +7,9 @@ import asyncio
 import json
 import base64
 import logging
-import os
 from typing import Literal
 from fastapi import WebSocket
 from pydantic import BaseModel, ValidationError
-from supabase import create_client, Client
 
 import sys
 from pathlib import Path
@@ -23,6 +21,7 @@ sys.path.insert(0, str(libs_path))
 from audio_utils import transcode_mulaw_to_pcm, transcode_pcm_24k_to_mulaw
 from src.brain.gemini_client import GeminiLiveClient
 from src.tools.save_booking import save_booking
+from src.db import get_db_client, PostgresClient
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +65,9 @@ class TwilioBaseMessage(BaseModel):
     event: str
 
 
-def get_supabase_client() -> Client | None:
-    """Get Supabase client instance."""
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_KEY")
-    if not url or not key:
-        logger.warning("SUPABASE_URL or SUPABASE_SERVICE_KEY not set - database disabled")
-        return None
-    return create_client(url, key)
+def get_database_client() -> PostgresClient | None:
+    """Get database client instance."""
+    return get_db_client()
 
 
 class TwilioMediaHandler:
@@ -84,12 +78,12 @@ class TwilioMediaHandler:
     Gemini responds with 24kHz LPCM16, we transcode back to 8kHz μ-law for Twilio.
     """
 
-    def __init__(self, websocket: WebSocket, db: Client | None = None):
+    def __init__(self, websocket: WebSocket, db: PostgresClient | None = None):
         self.websocket = websocket
         self.stream_sid: str | None = None
         self.call_sid: str | None = None
         self.call_id: str | None = None  # Database record ID
-        self._db = db or get_supabase_client()
+        self._db = db or get_database_client()
         self._outbound_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._is_speaking = False
         self._running = False
@@ -159,6 +153,9 @@ class TwilioMediaHandler:
 
                 # Create call record in database
                 await self._create_call_record()
+
+                # Send initial prompt to trigger Gemini's greeting
+                await gemini.send_text("The call has connected. Please introduce yourself and ask how you can help.")
             except ValidationError as e:
                 logger.error(f"Invalid start message: {e}")
                 return
@@ -175,9 +172,8 @@ class TwilioMediaHandler:
                 logger.error(f"Error decoding audio payload: {e}")
                 return
 
-            # Check for barge-in
-            if self._is_speaking:
-                await self._handle_barge_in(gemini)
+            # Note: Barge-in is handled automatically by Gemini's
+            # voice activity detection. We just forward all audio.
 
             # Transcode and send to Gemini
             pcm_audio = transcode_mulaw_to_pcm(mulaw_audio)

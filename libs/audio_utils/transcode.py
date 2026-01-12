@@ -136,7 +136,7 @@ def resample_16k_to_8k(samples: np.ndarray) -> np.ndarray:
 
 def resample_24k_to_8k(samples: np.ndarray) -> np.ndarray:
     """
-    Resample from 24kHz to 8kHz using decimation.
+    Resample from 24kHz to 8kHz with anti-aliasing filter.
 
     Args:
         samples: Input samples at 24kHz
@@ -144,8 +144,24 @@ def resample_24k_to_8k(samples: np.ndarray) -> np.ndarray:
     Returns:
         Output samples at 8kHz
     """
-    # Take every 3rd sample (24kHz / 3 = 8kHz)
-    return samples[::3].copy()
+    if len(samples) == 0:
+        return np.array([], dtype=np.int16)
+
+    # Apply simple moving average as low-pass anti-aliasing filter
+    # before decimation to prevent aliasing artifacts
+    # Window size of 3 for 3:1 decimation ratio
+    kernel_size = 3
+    if len(samples) >= kernel_size:
+        # Pad to handle edges
+        padded = np.pad(samples.astype(np.float32), (kernel_size // 2, kernel_size // 2), mode='edge')
+        # Simple moving average filter
+        filtered = np.convolve(padded, np.ones(kernel_size) / kernel_size, mode='valid')
+        # Decimate: take every 3rd sample
+        decimated = filtered[::3]
+        return decimated.astype(np.int16)
+    else:
+        # For very short samples, just decimate
+        return samples[::3].copy()
 
 
 def transcode_pcm_24k_to_mulaw(pcm_audio: bytes) -> bytes:

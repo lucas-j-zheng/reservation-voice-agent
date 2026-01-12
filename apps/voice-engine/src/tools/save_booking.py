@@ -3,11 +3,10 @@ Save Booking Tool
 Function calling tool for Gemini to save confirmed reservations.
 """
 
-import os
 from datetime import datetime
 from typing import TypedDict
 
-from supabase import create_client, Client
+from src.db import get_db_client
 
 
 class BookingDetails(TypedDict):
@@ -49,15 +48,6 @@ SAVE_BOOKING_SCHEMA = {
 }
 
 
-def get_supabase_client() -> Client:
-    """Get Supabase client instance."""
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_KEY")
-    if not url or not key:
-        raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set")
-    return create_client(url, key)
-
-
 async def save_booking(call_id: str, booking: BookingDetails) -> dict:
     """
     Save a confirmed reservation to the database.
@@ -69,7 +59,9 @@ async def save_booking(call_id: str, booking: BookingDetails) -> dict:
     Returns:
         The created reservation record
     """
-    client = get_supabase_client()
+    client = get_db_client()
+    if not client:
+        raise ValueError("Database client not available")
 
     # Parse the confirmed time
     confirmed_time = datetime.fromisoformat(booking["confirmed_time"])

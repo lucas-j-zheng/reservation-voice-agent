@@ -5,14 +5,21 @@ FastAPI application for handling Twilio WebSocket connections and Gemini Live AP
 
 import os
 import logging
-from fastapi import FastAPI, WebSocket
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from project root
+env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+load_dotenv(env_path)
+from fastapi import FastAPI, WebSocket, Request
+from fastapi.responses import Response
 from contextlib import asynccontextmanager
 
 import redis.asyncio as redis
-from supabase import create_client, Client
 
 from src.brain.gemini_client import GeminiLiveClient
 from src.stream.twilio_handler import TwilioMediaHandler
+from src.db import get_db_client, PostgresClient
 
 # Configure logging
 logging.basicConfig(
@@ -22,14 +29,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_supabase_client() -> Client | None:
-    """Initialize Supabase client from environment variables."""
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_KEY")
-    if not url or not key:
-        logger.warning("SUPABASE_URL or SUPABASE_SERVICE_KEY not set - database disabled")
-        return None
-    return create_client(url, key)
+def get_database_client() -> PostgresClient | None:
+    """Initialize database client from environment variables."""
+    return get_db_client()
 
 
 async def get_redis_client() -> redis.Redis | None:
@@ -50,10 +52,10 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager for startup/shutdown."""
     logger.info("Starting Voice Engine...")
 
-    # Initialize Supabase client
-    app.state.db = get_supabase_client()
+    # Initialize database client
+    app.state.db = get_database_client()
     if app.state.db:
-        logger.info("Supabase client initialized")
+        logger.info("Database client initialized")
 
     # Initialize Redis connection pool
     app.state.redis = await get_redis_client()
@@ -62,6 +64,9 @@ async def lifespan(app: FastAPI):
 
     # Cleanup resources
     logger.info("Shutting down Voice Engine...")
+    if app.state.db:
+        app.state.db.close()
+        logger.info("Database connection closed")
     if app.state.redis:
         await app.state.redis.close()
         logger.info("Redis connection closed")
@@ -80,7 +85,31 @@ async def health_check():
     return {"status": "healthy"}
 
 
-@app.websocket("/ws/twilio")
+@app.post("/ws/twilio")
+async def twilio_incoming_call(request: Request):
+    """
+    Handle incoming Twilio call webhook.
+    Returns TwiML to connect the call to our WebSocket stream.
+    """
+    # Get the host from the request to build WebSocket URL
+    host = request.headers.get("host", "localhost:8000")
+
+    # Use wss:// for production (https), ws:// for local
+    protocol = "wss" if "trycloudflare.com" in host or "https" in str(request.url) else "ws"
+
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>Please wait while we connect you.</Say>
+    <Connect>
+        <Stream url="{protocol}://{host}/ws/twilio/stream" />
+    </Connect>
+</Response>"""
+
+    logger.info(f"Incoming call - connecting to {protocol}://{host}/ws/twilio/stream")
+    return Response(content=twiml, media_type="application/xml")
+
+
+@app.websocket("/ws/twilio/stream")
 async def twilio_websocket(websocket: WebSocket):
     """
     Twilio Media Stream WebSocket endpoint.

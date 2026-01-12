@@ -86,6 +86,21 @@ class GeminiLiveClient:
             )
         )
 
+    async def send_text(self, text: str) -> None:
+        """
+        Send a text message to Gemini to prompt a response.
+        Useful for triggering the initial greeting.
+        """
+        if self.session is None:
+            logger.warning("Cannot send text: session not connected")
+            return
+
+        logger.info(f"Sending text prompt: {text}")
+        await self.session.send_client_content(
+            turns=[{"role": "user", "parts": [{"text": text}]}],
+            turn_complete=True
+        )
+
     async def receive_audio(self) -> AsyncGenerator[bytes, None]:
         """
         Receive audio responses from Gemini.
@@ -106,6 +121,16 @@ class GeminiLiveClient:
                         if self._on_tool_call_callback:
                             self._on_tool_call_callback(fc.name, fc.args)
 
+                # Log any transcripts from user input
+                if response.server_content:
+                    # Check for input transcription (what user said)
+                    if hasattr(response.server_content, 'input_transcription') and response.server_content.input_transcription:
+                        logger.info(f"[USER SAID]: {response.server_content.input_transcription}")
+
+                    # Check for output transcription (what AI said)
+                    if hasattr(response.server_content, 'output_transcription') and response.server_content.output_transcription:
+                        logger.info(f"[AI SAID]: {response.server_content.output_transcription}")
+
                 # Handle audio responses
                 if response.server_content and response.server_content.model_turn:
                     for part in response.server_content.model_turn.parts:
@@ -121,22 +146,17 @@ class GeminiLiveClient:
         Handle barge-in: clear pending audio and interrupt Gemini.
         Called when user starts speaking while AI is responding.
 
-        Sends ActivityStart to signal user speech, which triggers
-        Gemini to stop any ongoing audio generation.
+        Note: With automatic activity detection enabled (default),
+        Gemini handles barge-in automatically. We just clear the
+        local audio queue - no need to send explicit ActivityStart.
         """
         if self.session is None:
             logger.warning("Cannot interrupt: session not connected")
             return
 
-        try:
-            # Send ActivityStart to signal user is speaking
-            # This interrupts any ongoing model generation
-            await self.session.send_realtime_input(
-                activity_start=types.ActivityStart()
-            )
-            logger.info("Sent interrupt signal (ActivityStart)")
-        except Exception as e:
-            logger.error(f"Error sending interrupt: {e}")
+        # With automatic activity detection, Gemini handles interruption
+        # automatically when it detects user speech. We just log it.
+        logger.info("Barge-in detected - Gemini will handle automatically")
 
     def on_audio(self, callback: Callable[[bytes], None]) -> None:
         """Register callback for audio output."""

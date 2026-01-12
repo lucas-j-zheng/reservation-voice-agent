@@ -27,7 +27,9 @@ class GeminiLiveClient:
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY environment variable is required")
 
-        self.model = "gemini-2.5-flash-native-audio-preview-12-2025"
+        # Using -09-2025 version due to 1008 policy violation bug in -12-2025
+        # See: https://discuss.ai.google.dev/t/gemini-live-api-websocket-error-1008-operation-is-not-implemented-or-supported-or-enabled/114644
+        self.model = "gemini-2.5-flash-native-audio-preview-09-2025"
         self.session = None
         self._session_context = None
         self._on_audio_callback: Callable | None = None
@@ -46,11 +48,10 @@ class GeminiLiveClient:
             await self.close()
 
         # Configure the Live API session
-        # NOTE: Tools temporarily disabled - may not be supported with native audio preview
         config = {
             "response_modalities": ["AUDIO"],
             "system_instruction": SYSTEM_PROMPT,
-            # "tools": [{"function_declarations": [SAVE_BOOKING_SCHEMA]}],
+            "tools": [{"function_declarations": [SAVE_BOOKING_SCHEMA]}],
             # Enable transcriptions for logging
             "input_audio_transcription": {},
             "output_audio_transcription": {},
@@ -144,7 +145,7 @@ class GeminiLiveClient:
                         logger.info(f"Received tool call: {response.tool_call}")
                         for fc in response.tool_call.function_calls:
                             if self._on_tool_call_callback:
-                                self._on_tool_call_callback(fc.name, fc.args)
+                                self._on_tool_call_callback(fc.name, fc.id, fc.args)
 
                     # Log any transcripts from user input
                     if response.server_content:
@@ -199,9 +200,32 @@ class GeminiLiveClient:
         """Register callback for audio output."""
         self._on_audio_callback = callback
 
-    def on_tool_call(self, callback: Callable[[str, dict], None]) -> None:
-        """Register callback for function/tool calls."""
+    def on_tool_call(self, callback: Callable[[str, str, dict], None]) -> None:
+        """Register callback for function/tool calls. Callback receives (name, id, args)."""
         self._on_tool_call_callback = callback
+
+    async def send_tool_response(self, function_call_id: str, result: dict) -> None:
+        """
+        Send the result of a tool call back to Gemini.
+        This allows Gemini to continue the conversation after a tool is executed.
+        """
+        if self.session is None:
+            logger.warning("Cannot send tool response: session not connected")
+            return
+
+        logger.info(f"Sending tool response for {function_call_id}: {result}")
+
+        from google.genai import types
+
+        await self.session.send_tool_response(
+            function_responses=[
+                types.FunctionResponse(
+                    id=function_call_id,
+                    name="save_booking",
+                    response=result
+                )
+            ]
+        )
 
     async def close(self) -> None:
         """Close the Live API session."""

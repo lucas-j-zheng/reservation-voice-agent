@@ -89,6 +89,7 @@ class TwilioMediaHandler:
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._booking_saved = False  # Track if booking was saved
+        self._gemini: GeminiLiveClient | None = None  # Reference for tool responses
 
     async def handle_stream(self, gemini: GeminiLiveClient) -> None:
         """
@@ -97,6 +98,7 @@ class TwilioMediaHandler:
         """
         await gemini.connect()
         self._running = True
+        self._gemini = gemini  # Store reference for tool responses
 
         # Register tool callback to handle save_booking calls from Gemini
         gemini.on_tool_call(self._handle_tool_call)
@@ -218,21 +220,21 @@ class TwilioMediaHandler:
         except Exception as e:
             logger.error(f"Error creating call record: {e}")
 
-    def _handle_tool_call(self, tool_name: str, tool_args: dict) -> None:
+    def _handle_tool_call(self, tool_name: str, tool_id: str, tool_args: dict) -> None:
         """
         Handle tool calls from Gemini.
         Called when Gemini invokes a registered tool (e.g., save_booking).
         """
-        logger.info(f"Tool call received: {tool_name} with args: {tool_args}")
+        logger.info(f"Tool call received: {tool_name} (id={tool_id}) with args: {tool_args}")
 
         if tool_name == "save_booking":
             # Run async save_booking in background
-            asyncio.create_task(self._save_booking_async(tool_args))
+            asyncio.create_task(self._save_booking_async(tool_id, tool_args))
         else:
             logger.warning(f"Unknown tool call: {tool_name}")
 
-    async def _save_booking_async(self, booking_args: dict) -> None:
-        """Execute save_booking asynchronously."""
+    async def _save_booking_async(self, tool_id: str, booking_args: dict) -> None:
+        """Execute save_booking asynchronously and send response to Gemini."""
         if not self.call_id:
             logger.error("Cannot save booking: no call_id available")
             return
@@ -241,8 +243,22 @@ class TwilioMediaHandler:
             result = await save_booking(self.call_id, booking_args)
             self._booking_saved = True
             logger.info(f"Booking saved successfully: {result}")
+
+            # Send tool response back to Gemini so it can confirm to the user
+            if self._gemini:
+                await self._gemini.send_tool_response(tool_id, {
+                    "success": True,
+                    "message": "Booking saved successfully",
+                    "reservation_id": result.get("id", ""),
+                })
         except Exception as e:
             logger.error(f"Error saving booking: {e}")
+            # Send error response to Gemini
+            if self._gemini:
+                await self._gemini.send_tool_response(tool_id, {
+                    "success": False,
+                    "error": str(e),
+                })
 
     async def _update_call_status(self) -> None:
         """Update call status when stream ends."""

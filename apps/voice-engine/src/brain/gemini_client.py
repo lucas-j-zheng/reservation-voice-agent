@@ -46,10 +46,14 @@ class GeminiLiveClient:
             await self.close()
 
         # Configure the Live API session
+        # NOTE: Tools temporarily disabled - may not be supported with native audio preview
         config = {
             "response_modalities": ["AUDIO"],
             "system_instruction": SYSTEM_PROMPT,
-            "tools": [{"function_declarations": [SAVE_BOOKING_SCHEMA]}],
+            # "tools": [{"function_declarations": [SAVE_BOOKING_SCHEMA]}],
+            # Enable transcriptions for logging
+            "input_audio_transcription": {},
+            "output_audio_transcription": {},
         }
 
         logger.info(f"Connecting to Gemini Live API with model: {self.model}")
@@ -76,6 +80,8 @@ class GeminiLiveClient:
 
         if not audio_chunk:
             return
+
+        logger.debug(f"Sending audio to Gemini: {len(audio_chunk)} bytes")
 
         # Send audio as realtime input with proper MIME type
         # Gemini expects 16kHz, 16-bit PCM, little-endian
@@ -107,35 +113,66 @@ class GeminiLiveClient:
         Yields 24kHz LPCM16 audio chunks (Gemini's native output format).
 
         Also handles tool calls by invoking the registered callback.
+
+        IMPORTANT: session.receive() returns a single turn. After turn_complete,
+        we must call receive() again to get the next turn. This loop runs
+        continuously until the session is closed.
         """
         if self.session is None:
             logger.warning("Cannot receive audio: session not connected")
             return
 
         try:
-            async for response in self.session.receive():
-                # Handle tool calls
-                if response.tool_call:
-                    logger.info(f"Received tool call: {response.tool_call}")
-                    for fc in response.tool_call.function_calls:
-                        if self._on_tool_call_callback:
-                            self._on_tool_call_callback(fc.name, fc.args)
+            # Continuously receive turns from Gemini
+            # Each call to session.receive() returns one turn's worth of responses
+            while True:
+                if self.session is None:
+                    logger.info("Session closed, stopping receive loop")
+                    break
 
-                # Log any transcripts from user input
-                if response.server_content:
-                    # Check for input transcription (what user said)
-                    if hasattr(response.server_content, 'input_transcription') and response.server_content.input_transcription:
-                        logger.info(f"[USER SAID]: {response.server_content.input_transcription}")
+                logger.debug("Waiting for next turn from Gemini...")
+                turn = self.session.receive()
 
-                    # Check for output transcription (what AI said)
-                    if hasattr(response.server_content, 'output_transcription') and response.server_content.output_transcription:
-                        logger.info(f"[AI SAID]: {response.server_content.output_transcription}")
+                async for response in turn:
+                    # Log the full response structure for debugging
+                    logger.debug(f"Gemini response type: {type(response)}")
+                    logger.debug(f"Has tool_call: {bool(response.tool_call)}")
+                    logger.debug(f"Has server_content: {bool(response.server_content)}")
 
-                # Handle audio responses
-                if response.server_content and response.server_content.model_turn:
-                    for part in response.server_content.model_turn.parts:
-                        if part.inline_data and isinstance(part.inline_data.data, bytes):
-                            yield part.inline_data.data
+                    # Handle tool calls
+                    if response.tool_call:
+                        logger.info(f"Received tool call: {response.tool_call}")
+                        for fc in response.tool_call.function_calls:
+                            if self._on_tool_call_callback:
+                                self._on_tool_call_callback(fc.name, fc.args)
+
+                    # Log any transcripts from user input
+                    if response.server_content:
+                        sc = response.server_content
+                        # Log key fields
+                        if sc.turn_complete:
+                            logger.info(f"Turn complete. interrupted={sc.interrupted}")
+                        if sc.input_transcription:
+                            logger.info(f"[USER SAID]: {sc.input_transcription}")
+                        if sc.interrupted:
+                            logger.info(f"Gemini was interrupted by user")
+
+                        # Check for output transcription (what AI said)
+                        if hasattr(response.server_content, 'output_transcription') and response.server_content.output_transcription:
+                            logger.info(f"[AI SAID]: {response.server_content.output_transcription}")
+
+                    # Handle audio responses
+                    if response.server_content and response.server_content.model_turn:
+                        logger.debug(f"model_turn parts: {len(response.server_content.model_turn.parts)}")
+                        for part in response.server_content.model_turn.parts:
+                            logger.debug(f"Part type: {type(part)}, has inline_data: {hasattr(part, 'inline_data')}")
+                            if hasattr(part, 'inline_data') and part.inline_data:
+                                logger.debug(f"inline_data type: {type(part.inline_data.data)}, len: {len(part.inline_data.data) if part.inline_data.data else 0}")
+                            if part.inline_data and isinstance(part.inline_data.data, bytes):
+                                logger.info(f"Yielding audio chunk: {len(part.inline_data.data)} bytes")
+                                yield part.inline_data.data
+
+                logger.debug("Turn completed, waiting for next turn...")
 
         except Exception as e:
             logger.error(f"Error receiving audio: {e}")

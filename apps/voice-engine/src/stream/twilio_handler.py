@@ -177,6 +177,7 @@ class TwilioMediaHandler:
 
             # Transcode and send to Gemini
             pcm_audio = transcode_mulaw_to_pcm(mulaw_audio)
+            logger.debug(f"Sending {len(pcm_audio)} bytes to Gemini (from {len(mulaw_audio)} mulaw)")
             await gemini.send_audio(pcm_audio)
 
         elif event == "stop":

@@ -137,6 +137,9 @@ uv sync
 uv run python main.py
 # or with uvicorn for hot reload:
 uv run uvicorn main:app --reload --port 8000
+
+# Run tests
+uv run pytest tests/ -v
 ```
 
 ### Dashboard (Next.js)
@@ -160,3 +163,49 @@ npm run build
 # Expose voice-engine to Twilio via Cloudflare Tunnel
 cloudflared tunnel --url http://localhost:8000
 ```
+
+---
+
+## Environment Variables
+
+```bash
+# Required - AI
+GEMINI_API_KEY=              # Google AI API key for Gemini Live API
+
+# Required - Telephony
+TWILIO_ACCOUNT_SID=          # Twilio account identifier
+TWILIO_AUTH_TOKEN=           # Twilio auth token
+TWILIO_PHONE_NUMBER=         # Twilio phone number for outbound calls
+
+# Required - Database
+SUPABASE_URL=                # Supabase project URL
+SUPABASE_SERVICE_KEY=        # Supabase service role key (server-side only)
+
+# Optional
+DATABASE_URL=                # Direct PostgreSQL connection (overrides Supabase)
+REDIS_URL=                   # Redis connection (defaults to redis://localhost:6379)
+```
+
+---
+
+## Error Handling
+
+- Always include `call_id` in logs for traceability
+- Wrap DB operations in try/except; on failure update call status to `failed`
+- Never leave calls in `ongoing` status after handler exits
+- Handle malformed JSON and unknown Twilio events gracefully (log and skip)
+
+---
+
+## Implementation Notes
+
+### Gemini Model Version
+Uses `gemini-2.5-flash-native-audio-preview-09-2025` (NOT the latest -12-2025 version) due to a policy violation bug causing WebSocket error 1008. See: https://discuss.ai.google.dev/t/114644
+
+### Barge-in Handling
+Gemini's automatic voice activity detection handles barge-in. The handler clears the outbound audio queue when user speaks - no explicit ActivityStart signal needed.
+
+### Session Lifecycle
+- `receive_audio()` is a continuous async generator - each `session.receive()` returns one turn
+- After `turn_complete`, must call `receive()` again for next turn
+- Session stored in `_session_context` for proper cleanup via `__aexit__`

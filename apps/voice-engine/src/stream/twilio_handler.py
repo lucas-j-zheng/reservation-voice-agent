@@ -31,6 +31,7 @@ class TwilioStartData(BaseModel):
     """Data payload for 'start' event."""
     streamSid: str
     callSid: str
+    customParameters: dict | None = None  # For outbound call context
 
 
 class TwilioMediaData(BaseModel):
@@ -78,7 +79,25 @@ class TwilioMediaHandler:
     Gemini responds with 24kHz LPCM16, we transcode back to 8kHz μ-law for Twilio.
     """
 
-    def __init__(self, websocket: WebSocket, db: PostgresClient | None = None):
+    def __init__(
+        self,
+        websocket: WebSocket,
+        db: PostgresClient | None = None,
+        call_context: dict | None = None,
+        system_prompt: str | None = None,
+    ):
+        """
+        Initialize the Twilio Media Handler.
+
+        Args:
+            websocket: FastAPI WebSocket connection
+            db: Database client instance
+            call_context: Optional context for outbound calls containing:
+                - request_id: UUID of the reservation request
+                - restaurant_id: UUID of the restaurant being called
+                - Additional context fields for system prompt
+            system_prompt: Optional custom system prompt for Gemini
+        """
         self.websocket = websocket
         self.stream_sid: str | None = None
         self.call_sid: str | None = None
@@ -90,6 +109,8 @@ class TwilioMediaHandler:
         self._tasks: list[asyncio.Task] = []
         self._booking_saved = False  # Track if booking was saved
         self._gemini: GeminiLiveClient | None = None  # Reference for tool responses
+        self._call_context = call_context or {}
+        self._system_prompt = system_prompt
 
     async def handle_stream(self, gemini: GeminiLiveClient) -> None:
         """
@@ -206,10 +227,18 @@ class TwilioMediaHandler:
             return
 
         try:
-            result = self._db.table("calls").insert({
+            call_data = {
                 "twilio_sid": self.call_sid,
                 "status": "ongoing",
-            }).execute()
+            }
+
+            # Add outbound call context if available
+            if self._call_context.get("request_id"):
+                call_data["request_id"] = self._call_context["request_id"]
+            if self._call_context.get("restaurant_id"):
+                call_data["restaurant_id"] = self._call_context["restaurant_id"]
+
+            result = self._db.table("calls").insert(call_data).execute()
 
             if result.data:
                 self.call_id = result.data[0]["id"]
@@ -240,7 +269,14 @@ class TwilioMediaHandler:
             return
 
         try:
-            result = await save_booking(self.call_id, booking_args)
+            # Merge call context into booking args for enhanced save_booking
+            enhanced_args = {**booking_args}
+            if self._call_context.get("request_id"):
+                enhanced_args["request_id"] = self._call_context["request_id"]
+            if self._call_context.get("restaurant_id"):
+                enhanced_args["restaurant_id"] = self._call_context["restaurant_id"]
+
+            result = await save_booking(self.call_id, enhanced_args)
             self._booking_saved = True
             logger.info(f"Booking saved successfully: {result}")
 

@@ -63,17 +63,24 @@ async def save_booking(call_id: str, booking: BookingDetails) -> dict:
     if not client:
         raise ValueError("Database client not available")
 
-    # Parse the confirmed time
-    confirmed_time = datetime.fromisoformat(booking["confirmed_time"])
+    # Parse the confirmed time (ISO format: "2026-01-26T19:00:00")
+    confirmed_datetime = datetime.fromisoformat(booking["confirmed_time"])
 
-    # Insert reservation
+    # Insert reservation with separate date and time columns
     reservation = {
         "call_id": call_id,
         "restaurant_name": booking["restaurant_name"],
         "party_size": booking["party_size"],
-        "confirmed_time": confirmed_time.isoformat(),
+        "confirmed_date": confirmed_datetime.date().isoformat(),
+        "confirmed_time": confirmed_datetime.time().isoformat(),
         "confirmation_code": booking.get("confirmation_code"),
     }
+
+    # Add context fields if available
+    if booking.get("request_id"):
+        reservation["request_id"] = booking["request_id"]
+    if booking.get("restaurant_id"):
+        reservation["restaurant_id"] = booking["restaurant_id"]
 
     result = client.table("reservations").insert(reservation).execute()
 

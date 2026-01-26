@@ -32,6 +32,13 @@ class TableQuery:
         self._operation: str | None = None
         self._data: dict | None = None
         self._filters: list[tuple[str, str, Any]] = []
+        self._select_columns: str = "*"
+
+    def select(self, columns: str = "*") -> "TableQuery":
+        """Select columns from the table."""
+        self._operation = "select"
+        self._select_columns = columns
+        return self
 
     def insert(self, data: dict) -> "TableQuery":
         """Insert a row."""
@@ -55,7 +62,9 @@ class TableQuery:
         conn = self._client._get_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                if self._operation == "insert":
+                if self._operation == "select":
+                    return self._execute_select(cur)
+                elif self._operation == "insert":
                     return self._execute_insert(cur)
                 elif self._operation == "update":
                     return self._execute_update(cur)
@@ -63,6 +72,25 @@ class TableQuery:
                     raise ValueError(f"Unknown operation: {self._operation}")
         finally:
             conn.commit()
+
+    def _execute_select(self, cur) -> QueryResult:
+        """Execute SELECT and return matching rows."""
+        where_clause = ""
+        values = []
+
+        if self._filters:
+            conditions = [f"{col} {op} %s" for col, op, _ in self._filters]
+            where_clause = "WHERE " + " AND ".join(conditions)
+            values = [val for _, _, val in self._filters]
+
+        query = f"""
+            SELECT {self._select_columns}
+            FROM {self._table}
+            {where_clause}
+        """
+        cur.execute(query, values)
+        rows = cur.fetchall()
+        return QueryResult([dict(row) for row in rows] if rows else [])
 
     def _execute_insert(self, cur) -> QueryResult:
         """Execute INSERT and return the inserted row."""

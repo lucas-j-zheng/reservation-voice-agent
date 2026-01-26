@@ -22,7 +22,14 @@ class GeminiLiveClient:
     Provides sub-800ms response times for natural conversation.
     """
 
-    def __init__(self):
+    def __init__(self, system_prompt: str | None = None):
+        """
+        Initialize the Gemini Live client.
+
+        Args:
+            system_prompt: Optional custom system prompt. If not provided,
+                           uses the default SYSTEM_PROMPT from prompts.py.
+        """
         self.api_key = os.getenv("GEMINI_API_KEY")
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY environment variable is required")
@@ -34,6 +41,7 @@ class GeminiLiveClient:
         self._session_context = None
         self._on_audio_callback: Callable | None = None
         self._on_tool_call_callback: Callable | None = None
+        self._system_prompt = system_prompt or SYSTEM_PROMPT
 
         # Initialize the genai client
         self._client = genai.Client(api_key=self.api_key)
@@ -50,7 +58,7 @@ class GeminiLiveClient:
         # Configure the Live API session
         config = {
             "response_modalities": ["AUDIO"],
-            "system_instruction": SYSTEM_PROMPT,
+            "system_instruction": self._system_prompt,
             "tools": [{"function_declarations": [SAVE_BOOKING_SCHEMA]}],
             # Enable transcriptions for logging
             "input_audio_transcription": {},

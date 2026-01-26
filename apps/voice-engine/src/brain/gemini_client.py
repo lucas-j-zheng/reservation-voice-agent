@@ -11,7 +11,7 @@ from google import genai
 from google.genai import types
 
 from .prompts import SYSTEM_PROMPT
-from ..tools.save_booking import SAVE_BOOKING_SCHEMA
+from ..tools import ALL_TOOL_SCHEMAS
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class GeminiLiveClient:
         config = {
             "response_modalities": ["AUDIO"],
             "system_instruction": SYSTEM_PROMPT,
-            "tools": [{"function_declarations": [SAVE_BOOKING_SCHEMA]}],
+            "tools": [{"function_declarations": ALL_TOOL_SCHEMAS}],
             # Enable transcriptions for logging
             "input_audio_transcription": {},
             "output_audio_transcription": {},
@@ -204,16 +204,21 @@ class GeminiLiveClient:
         """Register callback for function/tool calls. Callback receives (name, id, args)."""
         self._on_tool_call_callback = callback
 
-    async def send_tool_response(self, function_call_id: str, result: dict) -> None:
+    async def send_tool_response(self, function_call_id: str, tool_name: str, result: dict) -> None:
         """
         Send the result of a tool call back to Gemini.
         This allows Gemini to continue the conversation after a tool is executed.
+
+        Args:
+            function_call_id: The ID of the function call from Gemini
+            tool_name: The name of the tool that was called
+            result: The result dictionary to send back
         """
         if self.session is None:
             logger.warning("Cannot send tool response: session not connected")
             return
 
-        logger.info(f"Sending tool response for {function_call_id}: {result}")
+        logger.info(f"Sending tool response for {tool_name} ({function_call_id}): {result}")
 
         from google.genai import types
 
@@ -221,7 +226,7 @@ class GeminiLiveClient:
             function_responses=[
                 types.FunctionResponse(
                     id=function_call_id,
-                    name="save_booking",
+                    name=tool_name,
                     response=result
                 )
             ]

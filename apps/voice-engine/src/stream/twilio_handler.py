@@ -31,6 +31,7 @@ class TwilioStartData(BaseModel):
     """Data payload for 'start' event."""
     streamSid: str
     callSid: str
+    customParameters: dict | None = None  # For outbound call context
 
 
 class TwilioMediaData(BaseModel):
@@ -82,11 +83,23 @@ class TwilioMediaHandler:
         self,
         websocket: WebSocket,
         db: PostgresClient | None = None,
-        request_id: str | None = None,
-        restaurant_id: str | None = None,
-        restaurant_name: str | None = None,
-        user_id: str | None = None,
+        call_context: dict | None = None,
+        system_prompt: str | None = None,
     ):
+        """
+        Initialize the Twilio Media Handler.
+
+        Args:
+            websocket: FastAPI WebSocket connection
+            db: Database client instance
+            call_context: Optional context for outbound calls containing:
+                - request_id: UUID of the reservation request
+                - restaurant_id: UUID of the restaurant being called
+                - restaurant_name: Name of the restaurant
+                - user_id: UUID of the user
+                - Additional context fields for system prompt
+            system_prompt: Optional custom system prompt for Gemini
+        """
         self.websocket = websocket
         self.stream_sid: str | None = None
         self.call_sid: str | None = None
@@ -98,12 +111,14 @@ class TwilioMediaHandler:
         self._tasks: list[asyncio.Task] = []
         self._booking_saved = False  # Track if booking was saved
         self._gemini: GeminiLiveClient | None = None  # Reference for tool responses
+        self._call_context = call_context or {}
+        self._system_prompt = system_prompt
 
-        # Context for tool calls (populated from UI/orchestration)
-        self._request_id = request_id
-        self._restaurant_id = restaurant_id
-        self._restaurant_name = restaurant_name
-        self._user_id = user_id
+        # Extract context fields for tool calls
+        self._request_id = self._call_context.get("request_id")
+        self._restaurant_id = self._call_context.get("restaurant_id")
+        self._restaurant_name = self._call_context.get("restaurant_name")
+        self._user_id = self._call_context.get("user_id")
 
     async def handle_stream(self, gemini: GeminiLiveClient) -> None:
         """

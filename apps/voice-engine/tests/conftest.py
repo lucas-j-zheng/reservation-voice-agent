@@ -1,19 +1,21 @@
 """
-Test fixtures and mocks for voice-engine E2E tests.
+Test fixtures and mocks for voice-engine tests.
 """
 
 import asyncio
 import base64
 import json
+import os
 import uuid
 from datetime import datetime, timezone
-from typing import AsyncGenerator, Callable
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import AsyncGenerator, Callable, Generator
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import pytest_asyncio
 from fastapi import WebSocket
 from fastapi.testclient import TestClient
+from httpx import AsyncClient, ASGITransport
 
 import sys
 from pathlib import Path
@@ -21,6 +23,42 @@ from pathlib import Path
 # Add libs to path for local development
 libs_path = Path(__file__).parent.parent.parent.parent / "libs"
 sys.path.insert(0, str(libs_path))
+
+# Set test environment variables before importing app
+os.environ.setdefault("GEMINI_API_KEY", "test-api-key")
+os.environ.setdefault("TWILIO_ACCOUNT_SID", "ACtest123")
+os.environ.setdefault("TWILIO_AUTH_TOKEN", "test-auth-token")
+os.environ.setdefault("TWILIO_PHONE_NUMBER", "+15551234567")
+
+
+# ============================================================================
+# Sample Test Data
+# ============================================================================
+
+SAMPLE_USER = {
+    "id": "user-uuid-123",
+    "name": "John Doe",
+    "email": "john@example.com",
+    "phone": "+15559876543",
+}
+
+SAMPLE_RESTAURANT = {
+    "id": "restaurant-uuid-456",
+    "name": "Le Petit Bistro",
+    "phone": "+15551112222",
+    "address": "123 Main St",
+}
+
+SAMPLE_RESERVATION_REQUEST = {
+    "id": "request-uuid-789",
+    "user_id": "user-uuid-123",
+    "status": "pending",
+    "party_size": 4,
+    "requested_date": "2024-02-15",
+    "time_range_start": "18:00",
+    "time_range_end": "20:00",
+    "special_requests": "outdoor seating preferred",
+}
 
 
 # ============================================================================
@@ -96,8 +134,20 @@ class MockQueryBuilder:
 class MockDatabaseClient:
     """Mock database client that stores data in memory."""
 
-    def __init__(self):
+    def __init__(self, preload_data: bool = False):
         self._data_store: dict[str, list] = {}
+        if preload_data:
+            self._data_store = {
+                "users": [SAMPLE_USER],
+                "restaurants": [SAMPLE_RESTAURANT],
+                "reservation_requests": [SAMPLE_RESERVATION_REQUEST],
+                "calls": [],
+            }
+
+    @property
+    def _tables(self) -> dict[str, list]:
+        """Alias for backward compatibility with tests."""
+        return self._data_store
 
     def table(self, name: str) -> MockQueryBuilder:
         return MockQueryBuilder(name, self._data_store)
@@ -115,10 +165,64 @@ class MockDatabaseClient:
         pass
 
 
+class MockRedisClient:
+    """Mock Redis client for testing."""
+
+    def __init__(self):
+        self._store = {}
+
+    async def get(self, key: str) -> str | None:
+        return self._store.get(key)
+
+    async def setex(self, key: str, ttl: int, value: str) -> None:
+        self._store[key] = value
+
+    async def ping(self) -> bool:
+        return True
+
+    async def close(self) -> None:
+        pass
+
+
+# Aliases for backward compatibility
+MockQueryResult = MagicMock  # Used by test_outbound_call.py
+MockTableQuery = MockQueryBuilder  # Used by test_outbound_call.py
+
+
 @pytest.fixture
 def mock_db():
     """Provide a fresh mock database for each test."""
     return MockDatabaseClient()
+
+
+@pytest.fixture
+def mock_db_with_data():
+    """Provide a mock database preloaded with sample data."""
+    return MockDatabaseClient(preload_data=True)
+
+
+@pytest.fixture
+def mock_redis():
+    """Provide a mock Redis client."""
+    return MockRedisClient()
+
+
+# ============================================================================
+# Twilio Mocks
+# ============================================================================
+
+
+@pytest.fixture
+def mock_twilio_client(mocker):
+    """Mock Twilio client for outbound calls."""
+    mock_call = Mock()
+    mock_call.sid = "CA_test_call_sid_123"
+
+    mock_client = Mock()
+    mock_client.calls.create.return_value = mock_call
+
+    mocker.patch("main.TwilioClient", return_value=mock_client)
+    return mock_client
 
 
 # ============================================================================
@@ -215,22 +319,20 @@ class MockGeminiClient:
 
     def __init__(self):
         self._mock_session = MockGeminiSession()
-        self.session = self._mock_session  # Always have session for simpler testing
+        self.session = self._mock_session
         self._on_tool_call_callback: Callable | None = None
         self._connected = False
-        self._tool_responses: list[dict] = []  # Track tool responses directly
+        self._tool_responses: list[dict] = []
 
     async def connect(self):
-        """Mock connect - sets up session."""
+        """Mock connect."""
         self.session = self._mock_session
         self._connected = True
 
     async def send_audio(self, audio_chunk: bytes):
         """Mock send_audio."""
         if self.session:
-            await self.session.send_realtime_input(
-                MagicMock(data=audio_chunk)
-            )
+            await self.session.send_realtime_input(MagicMock(data=audio_chunk))
 
     async def send_text(self, text: str):
         """Mock send_text."""
@@ -241,17 +343,15 @@ class MockGeminiClient:
             )
 
     async def receive_audio(self) -> AsyncGenerator[bytes, None]:
-        """Mock receive_audio - yields queued audio and handles tool calls."""
+        """Mock receive_audio."""
         if not self.session:
             return
 
         async for response in self.session._mock_receive():
-            # Handle tool calls
             if response.tool_call and self._on_tool_call_callback:
                 for fc in response.tool_call.function_calls:
                     self._on_tool_call_callback(fc.name, fc.id, fc.args)
 
-            # Yield audio
             if response.server_content and response.server_content.model_turn:
                 for part in response.server_content.model_turn.parts:
                     if part.inline_data and part.inline_data.data:
@@ -266,14 +366,12 @@ class MockGeminiClient:
         self._on_tool_call_callback = callback
 
     async def send_tool_response(self, function_call_id: str, tool_name: str, result: dict):
-        """Mock send_tool_response - always tracks responses."""
-        # Track directly on client for easier test assertions
+        """Mock send_tool_response."""
         self._tool_responses.append({
             "id": function_call_id,
             "name": tool_name,
             "response": result,
         })
-        # Also track on session if available
         if self.session:
             resp = MagicMock()
             resp.id = function_call_id
@@ -286,7 +384,6 @@ class MockGeminiClient:
         self.session = None
         self._connected = False
 
-    # Test helpers
     def queue_audio_response(self, audio: bytes):
         """Queue audio to be returned."""
         self._mock_session.queue_audio(audio)
@@ -297,22 +394,10 @@ class MockGeminiClient:
             tool_id = str(uuid.uuid4())
         self._mock_session.queue_tool_call(name, tool_id, args)
 
-    def get_received_audio(self) -> list[bytes]:
-        """Get all audio sent to Gemini."""
-        return self._mock_session._received_audio
-
-    def get_received_text(self) -> list[str]:
-        """Get all text sent to Gemini."""
-        return self._mock_session._received_text
-
-    def get_tool_responses(self) -> list[dict]:
-        """Get all tool responses sent back to Gemini."""
-        return self._tool_responses
-
 
 @pytest.fixture
 def mock_gemini():
-    """Provide a fresh mock Gemini client for each test."""
+    """Provide a fresh mock Gemini client."""
     return MockGeminiClient()
 
 
@@ -330,81 +415,53 @@ class MockWebSocket:
         self._closed = False
 
     async def accept(self):
-        """Mock accept."""
         pass
 
     async def close(self):
-        """Mock close."""
         self._closed = True
 
     async def send_json(self, data: dict):
-        """Record outgoing messages."""
         self._outgoing.append(data)
 
     async def receive_text(self) -> str:
-        """Get next incoming message."""
         return await self._incoming.get()
 
     async def iter_text(self):
-        """Iterate over incoming messages until None is received."""
         while True:
             msg = await self._incoming.get()
             if msg is None:
                 break
             yield msg
 
-    # Test helpers
     def send_message(self, data: dict):
-        """Queue a message to be received by the handler."""
         self._incoming.put_nowait(json.dumps(data))
 
     def send_connected(self):
-        """Send Twilio 'connected' event."""
         self.send_message({"event": "connected"})
 
     def send_start(self, call_sid: str = "CA123", stream_sid: str = "MZ456"):
-        """Send Twilio 'start' event."""
         self.send_message({
             "event": "start",
-            "start": {
-                "streamSid": stream_sid,
-                "callSid": call_sid,
-            }
+            "start": {"streamSid": stream_sid, "callSid": call_sid}
         })
 
     def send_media(self, audio: bytes):
-        """Send Twilio 'media' event with audio."""
         payload = base64.b64encode(audio).decode("utf-8")
-        self.send_message({
-            "event": "media",
-            "media": {"payload": payload}
-        })
+        self.send_message({"event": "media", "media": {"payload": payload}})
 
     def send_stop(self):
-        """Send Twilio 'stop' event."""
         self.send_message({"event": "stop"})
 
     def close_stream(self):
-        """Signal end of WebSocket stream."""
         self._incoming.put_nowait(None)
 
     def get_outgoing(self) -> list[dict]:
-        """Get all messages sent by the handler."""
         return self._outgoing
-
-    def get_audio_sent(self) -> list[bytes]:
-        """Get all audio chunks sent to Twilio."""
-        audio = []
-        for msg in self._outgoing:
-            if msg.get("event") == "media":
-                payload = msg.get("media", {}).get("payload", "")
-                audio.append(base64.b64decode(payload))
-        return audio
 
 
 @pytest.fixture
 def mock_websocket():
-    """Provide a fresh mock WebSocket for each test."""
+    """Provide a fresh mock WebSocket."""
     return MockWebSocket()
 
 
@@ -414,49 +471,25 @@ def mock_websocket():
 
 
 def generate_mulaw_silence(duration_ms: int = 100, sample_rate: int = 8000) -> bytes:
-    """Generate silent μ-law audio (0xFF is silence in μ-law)."""
+    """Generate silent μ-law audio."""
     num_samples = int(sample_rate * duration_ms / 1000)
     return bytes([0xFF] * num_samples)
 
 
 def generate_pcm_silence(duration_ms: int = 100, sample_rate: int = 16000) -> bytes:
-    """Generate silent 16-bit PCM audio (zeros)."""
+    """Generate silent 16-bit PCM audio."""
     num_samples = int(sample_rate * duration_ms / 1000)
-    return bytes(num_samples * 2)  # 2 bytes per sample
-
-
-def generate_pcm_tone(
-    frequency: int = 440,
-    duration_ms: int = 100,
-    sample_rate: int = 16000,
-    amplitude: int = 16000,
-) -> bytes:
-    """Generate a simple sine wave tone as 16-bit PCM."""
-    import math
-
-    num_samples = int(sample_rate * duration_ms / 1000)
-    samples = []
-
-    for i in range(num_samples):
-        t = i / sample_rate
-        value = int(amplitude * math.sin(2 * math.pi * frequency * t))
-        # Convert to little-endian 16-bit signed
-        samples.append(value & 0xFF)
-        samples.append((value >> 8) & 0xFF)
-
-    return bytes(samples)
+    return bytes(num_samples * 2)
 
 
 @pytest.fixture
 def mulaw_silence():
-    """Provide silent μ-law audio data."""
     return generate_mulaw_silence()
 
 
 @pytest.fixture
 def pcm_audio():
-    """Provide sample PCM audio data."""
-    return generate_pcm_tone()
+    return generate_pcm_silence()
 
 
 # ============================================================================
@@ -489,21 +522,29 @@ def booking_args():
 
 
 @pytest.fixture
-def no_availability_args():
-    """Provide sample no-availability arguments."""
+def sample_outbound_request():
+    """Sample outbound call request body."""
     return {
-        "reason": "Fully booked for the requested time",
-        "alternative_offered": "8:30 PM available",
-        "should_try_alternative": True,
+        "request_id": SAMPLE_RESERVATION_REQUEST["id"],
+        "restaurant_id": SAMPLE_RESTAURANT["id"],
     }
 
 
 @pytest.fixture
-def end_call_args():
-    """Provide sample end-call arguments."""
+def sample_call_context():
+    """Sample call context as stored in Redis."""
     return {
-        "reason": "User declined alternative time",
-        "call_summary": "Called to book 7pm, fully booked, declined 8:30pm alternative",
+        "call_type": "outbound",
+        "request_id": SAMPLE_RESERVATION_REQUEST["id"],
+        "restaurant_id": SAMPLE_RESTAURANT["id"],
+        "restaurant_name": SAMPLE_RESTAURANT["name"],
+        "user_name": SAMPLE_USER["name"],
+        "party_size": SAMPLE_RESERVATION_REQUEST["party_size"],
+        "requested_date": SAMPLE_RESERVATION_REQUEST["requested_date"],
+        "time_range_start": SAMPLE_RESERVATION_REQUEST["time_range_start"],
+        "time_range_end": SAMPLE_RESERVATION_REQUEST["time_range_end"],
+        "special_requests": SAMPLE_RESERVATION_REQUEST["special_requests"],
+        "contact_phone": SAMPLE_USER["phone"],
     }
 
 
@@ -513,27 +554,29 @@ def end_call_args():
 
 
 @pytest.fixture
-def mock_env(monkeypatch):
-    """Set up mock environment variables."""
-    monkeypatch.setenv("GEMINI_API_KEY", "test-api-key")
-    monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
-    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "test-service-key")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379")
+def app_with_mocks(mock_db_with_data, mock_redis):
+    """Configure app with mock dependencies."""
+    from main import app, _call_context_store
+
+    app.state.db = mock_db_with_data
+    app.state.redis = mock_redis
+    _call_context_store.clear()
+    return app
 
 
-@pytest_asyncio.fixture
-async def app_with_mocks(mock_db, mock_env):
-    """Provide FastAPI app with mocked dependencies."""
-    from main import app
+@pytest.fixture
+async def async_client(app_with_mocks) -> AsyncGenerator[AsyncClient, None]:
+    """Provide async HTTP client for testing."""
+    transport = ASGITransport(app=app_with_mocks)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
-    # Override app.state with mocks
-    app.state.db = mock_db
-    app.state.redis = None  # Skip Redis for tests
 
-    yield app
-
-    # Cleanup
-    app.state.db = None
+@pytest.fixture
+def sync_client(app_with_mocks) -> Generator[TestClient, None, None]:
+    """Provide sync HTTP client for testing."""
+    with TestClient(app_with_mocks) as client:
+        yield client
 
 
 # ============================================================================
@@ -549,6 +592,4 @@ def event_loop_policy():
 
 def pytest_configure(config):
     """Configure pytest-asyncio."""
-    config.addinivalue_line(
-        "markers", "asyncio: mark test as async"
-    )
+    config.addinivalue_line("markers", "asyncio: mark test as async")

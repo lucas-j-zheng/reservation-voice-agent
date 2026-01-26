@@ -20,7 +20,7 @@ sys.path.insert(0, str(libs_path))
 
 from audio_utils import transcode_mulaw_to_pcm, transcode_pcm_24k_to_mulaw
 from src.brain.gemini_client import GeminiLiveClient
-from src.tools.save_booking import save_booking
+from src.tools import save_booking, report_no_availability, end_call, CallContext
 from src.db import get_db_client, PostgresClient
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,8 @@ class TwilioMediaHandler:
             call_context: Optional context for outbound calls containing:
                 - request_id: UUID of the reservation request
                 - restaurant_id: UUID of the restaurant being called
+                - restaurant_name: Name of the restaurant
+                - user_id: UUID of the user
                 - Additional context fields for system prompt
             system_prompt: Optional custom system prompt for Gemini
         """
@@ -111,6 +113,12 @@ class TwilioMediaHandler:
         self._gemini: GeminiLiveClient | None = None  # Reference for tool responses
         self._call_context = call_context or {}
         self._system_prompt = system_prompt
+
+        # Extract context fields for tool calls
+        self._request_id = self._call_context.get("request_id")
+        self._restaurant_id = self._call_context.get("restaurant_id")
+        self._restaurant_name = self._call_context.get("restaurant_name")
+        self._user_id = self._call_context.get("user_id")
 
     async def handle_stream(self, gemini: GeminiLiveClient) -> None:
         """
@@ -232,66 +240,132 @@ class TwilioMediaHandler:
                 "status": "ongoing",
             }
 
-            # Add outbound call context if available
-            if self._call_context.get("request_id"):
-                call_data["request_id"] = self._call_context["request_id"]
-            if self._call_context.get("restaurant_id"):
-                call_data["restaurant_id"] = self._call_context["restaurant_id"]
+            # Add optional context fields
+            if self._request_id:
+                call_data["request_id"] = self._request_id
+            if self._restaurant_id:
+                call_data["restaurant_id"] = self._restaurant_id
 
             result = self._db.table("calls").insert(call_data).execute()
 
             if result.data:
                 self.call_id = result.data[0]["id"]
                 logger.info(f"Created call record: {self.call_id} for twilio_sid: {self.call_sid}")
+
+                # If part of a request, update request status to in_progress
+                if self._request_id:
+                    self._db.table("reservation_requests").update(
+                        {"status": "in_progress"}
+                    ).eq("id", self._request_id).execute()
             else:
                 logger.error("Failed to create call record - no data returned")
 
         except Exception as e:
             logger.error(f"Error creating call record: {e}")
 
+    def _get_call_context(self) -> CallContext:
+        """Build the call context for tool execution."""
+        return CallContext(
+            call_id=self.call_id,
+            request_id=self._request_id,
+            restaurant_id=self._restaurant_id,
+            restaurant_name=self._restaurant_name,
+            user_id=self._user_id,
+        )
+
     def _handle_tool_call(self, tool_name: str, tool_id: str, tool_args: dict) -> None:
         """
         Handle tool calls from Gemini.
-        Called when Gemini invokes a registered tool (e.g., save_booking).
+        Called when Gemini invokes a registered tool.
         """
         logger.info(f"Tool call received: {tool_name} (id={tool_id}) with args: {tool_args}")
 
         if tool_name == "save_booking":
-            # Run async save_booking in background
-            asyncio.create_task(self._save_booking_async(tool_id, tool_args))
+            asyncio.create_task(self._execute_save_booking(tool_id, tool_args))
+        elif tool_name == "report_no_availability":
+            asyncio.create_task(self._execute_report_no_availability(tool_id, tool_args))
+        elif tool_name == "end_call":
+            asyncio.create_task(self._execute_end_call(tool_id, tool_args))
         else:
             logger.warning(f"Unknown tool call: {tool_name}")
 
-    async def _save_booking_async(self, tool_id: str, booking_args: dict) -> None:
+    async def _execute_save_booking(self, tool_id: str, booking_args: dict) -> None:
         """Execute save_booking asynchronously and send response to Gemini."""
         if not self.call_id:
             logger.error("Cannot save booking: no call_id available")
+            if self._gemini:
+                await self._gemini.send_tool_response(tool_id, "save_booking", {
+                    "success": False,
+                    "error": "No call_id available",
+                })
             return
 
         try:
-            # Merge call context into booking args for enhanced save_booking
-            enhanced_args = {**booking_args}
-            if self._call_context.get("request_id"):
-                enhanced_args["request_id"] = self._call_context["request_id"]
-            if self._call_context.get("restaurant_id"):
-                enhanced_args["restaurant_id"] = self._call_context["restaurant_id"]
-
-            result = await save_booking(self.call_id, enhanced_args)
+            context = self._get_call_context()
+            result = await save_booking(context, booking_args)
             self._booking_saved = True
             logger.info(f"Booking saved successfully: {result}")
 
             # Send tool response back to Gemini so it can confirm to the user
             if self._gemini:
-                await self._gemini.send_tool_response(tool_id, {
-                    "success": True,
-                    "message": "Booking saved successfully",
-                    "reservation_id": result.get("id", ""),
-                })
+                await self._gemini.send_tool_response(tool_id, "save_booking", result)
         except Exception as e:
             logger.error(f"Error saving booking: {e}")
             # Send error response to Gemini
             if self._gemini:
-                await self._gemini.send_tool_response(tool_id, {
+                await self._gemini.send_tool_response(tool_id, "save_booking", {
+                    "success": False,
+                    "error": str(e),
+                })
+
+    async def _execute_report_no_availability(self, tool_id: str, args: dict) -> None:
+        """Execute report_no_availability asynchronously and send response to Gemini."""
+        if not self.call_id:
+            logger.error("Cannot report no availability: no call_id available")
+            if self._gemini:
+                await self._gemini.send_tool_response(tool_id, "report_no_availability", {
+                    "success": False,
+                    "error": "No call_id available",
+                })
+            return
+
+        try:
+            context = self._get_call_context()
+            result = await report_no_availability(context, args)
+            logger.info(f"No availability reported: {result}")
+
+            if self._gemini:
+                await self._gemini.send_tool_response(tool_id, "report_no_availability", result)
+        except Exception as e:
+            logger.error(f"Error reporting no availability: {e}")
+            if self._gemini:
+                await self._gemini.send_tool_response(tool_id, "report_no_availability", {
+                    "success": False,
+                    "error": str(e),
+                })
+
+    async def _execute_end_call(self, tool_id: str, args: dict) -> None:
+        """Execute end_call asynchronously and send response to Gemini."""
+        if not self.call_id:
+            logger.error("Cannot end call: no call_id available")
+            if self._gemini:
+                await self._gemini.send_tool_response(tool_id, "end_call", {
+                    "success": False,
+                    "error": "No call_id available",
+                })
+            return
+
+        try:
+            context = self._get_call_context()
+            result = await end_call(context, args)
+            logger.info(f"Call ended: {result}")
+
+            if self._gemini:
+                await self._gemini.send_tool_response(tool_id, "end_call", result)
+        except Exception as e:
+            logger.error(f"Error ending call: {e}")
+            if self._gemini:
+                await self._gemini.send_tool_response(tool_id, "end_call", {
                     "success": False,
                     "error": str(e),
                 })

@@ -13,6 +13,7 @@ env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(env_path)
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import Response
+from starlette.websockets import WebSocketState
 from contextlib import asynccontextmanager
 
 import redis.asyncio as redis
@@ -124,7 +125,8 @@ async def twilio_websocket(websocket: WebSocket):
     try:
         await handler.handle_stream(gemini)
     finally:
-        await websocket.close()
+        if websocket.client_state == WebSocketState.CONNECTED:
+            await websocket.close()
 
 
 if __name__ == "__main__":

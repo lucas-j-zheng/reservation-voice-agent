@@ -226,10 +226,10 @@ async def initiate_outbound_call(request: Request, body: InitiateOutboundCallReq
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
 
-    # Validate and fetch reservation request
-    request_result = db.table("reservation_requests").select("*").eq("id", body.request_id).execute()
+    # Validate and fetch request
+    request_result = db.table("requests").select("*").eq("id", body.request_id).execute()
     if not request_result.data:
-        raise HTTPException(status_code=404, detail="Reservation request not found")
+        raise HTTPException(status_code=404, detail="Request not found")
 
     reservation_request = request_result.data[0]
     if reservation_request.get("status") not in ("pending", "in_progress"):
@@ -237,6 +237,10 @@ async def initiate_outbound_call(request: Request, body: InitiateOutboundCallReq
             status_code=400,
             detail=f"Request status is '{reservation_request.get('status')}', must be pending or in_progress"
         )
+
+    # Fetch reservation details for this request
+    details_result = db.table("reservation_details").select("*").eq("request_id", body.request_id).execute()
+    reservation_details = details_result.data[0] if details_result.data else {}
 
     # Validate and fetch restaurant
     restaurant_result = db.table("restaurants").select("*").eq("id", body.restaurant_id).execute()
@@ -260,9 +264,9 @@ async def initiate_outbound_call(request: Request, body: InitiateOutboundCallReq
     context_id = str(uuid.uuid4())
 
     # Convert date/time objects to strings for JSON serialization
-    requested_date = reservation_request.get("requested_date", "")
-    time_range_start = reservation_request.get("time_range_start", "")
-    time_range_end = reservation_request.get("time_range_end", "")
+    requested_date = reservation_details.get("requested_date", "")
+    time_range_start = reservation_details.get("time_range_start", "")
+    time_range_end = reservation_details.get("time_range_end", "")
 
     if hasattr(requested_date, 'isoformat'):
         requested_date = requested_date.isoformat()
@@ -277,11 +281,11 @@ async def initiate_outbound_call(request: Request, body: InitiateOutboundCallReq
         "restaurant_id": body.restaurant_id,
         "restaurant_name": restaurant.get("name", "the restaurant"),
         "user_name": user_name,
-        "party_size": reservation_request.get("party_size", 2),
+        "party_size": reservation_details.get("party_size", 2),
         "requested_date": str(requested_date) if requested_date else "",
         "time_range_start": str(time_range_start) if time_range_start else "",
         "time_range_end": str(time_range_end) if time_range_end else "",
-        "special_requests": reservation_request.get("special_requests", ""),
+        "special_requests": reservation_details.get("special_requests", ""),
         "contact_phone": contact_phone,
     }
 
@@ -312,8 +316,8 @@ async def initiate_outbound_call(request: Request, body: InitiateOutboundCallReq
 
         logger.info(f"Initiated outbound call: {call.sid} to {restaurant.get('phone')}")
 
-        # Update reservation request status
-        db.table("reservation_requests").update({
+        # Update request status
+        db.table("requests").update({
             "status": "in_progress"
         }).eq("id", body.request_id).execute()
 

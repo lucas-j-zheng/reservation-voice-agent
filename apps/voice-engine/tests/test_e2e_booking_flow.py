@@ -131,7 +131,7 @@ class TestSuccessfulBookingFlow:
             "status": "ongoing",
         }).execute()
 
-        mock_db.table("reservation_requests").insert({
+        mock_db.table("requests").insert({
             "id": request_id,
             "status": "in_progress",
         }).execute()
@@ -140,7 +140,7 @@ class TestSuccessfulBookingFlow:
             await save_booking(call_context, booking_args)
 
         # Verify request status updated
-        requests = mock_db.get_data("reservation_requests")
+        requests = mock_db.get_data("requests")
         updated_request = next((r for r in requests if r["id"] == request_id), None)
         assert updated_request is not None
         assert updated_request["status"] == "completed"

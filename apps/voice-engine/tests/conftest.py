@@ -49,15 +49,28 @@ SAMPLE_RESTAURANT = {
     "address": "123 Main St",
 }
 
-SAMPLE_RESERVATION_REQUEST = {
+SAMPLE_REQUEST = {
     "id": "request-uuid-789",
     "user_id": "user-uuid-123",
+    "type": "reservation",
     "status": "pending",
+}
+
+SAMPLE_RESERVATION_DETAILS = {
+    "id": "detail-uuid-101",
+    "request_id": "request-uuid-789",
     "party_size": 4,
     "requested_date": "2024-02-15",
     "time_range_start": "18:00",
     "time_range_end": "20:00",
     "special_requests": "outdoor seating preferred",
+}
+
+# Legacy alias for backward compatibility in tests
+# Note: SAMPLE_REQUEST fields override SAMPLE_RESERVATION_DETAILS fields (like 'id')
+SAMPLE_RESERVATION_REQUEST = {
+    **SAMPLE_RESERVATION_DETAILS,
+    **SAMPLE_REQUEST,
 }
 
 
@@ -140,7 +153,8 @@ class MockDatabaseClient:
             self._data_store = {
                 "users": [SAMPLE_USER],
                 "restaurants": [SAMPLE_RESTAURANT],
-                "reservation_requests": [SAMPLE_RESERVATION_REQUEST],
+                "requests": [SAMPLE_REQUEST],
+                "reservation_details": [SAMPLE_RESERVATION_DETAILS],
                 "calls": [],
             }
 

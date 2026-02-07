@@ -56,37 +56,28 @@ class Restaurant(BaseModel):
 
 
 # ============================================
-# RESERVATION REQUEST SCHEMAS (UI Intent)
+# GENERALIZED REQUEST SCHEMAS
 # ============================================
 
 
-ReservationRequestStatus = Literal["pending", "in_progress", "completed", "failed", "cancelled"]
+RequestType = Literal["reservation", "info_query", "event_inquiry", "cancellation"]
+RequestStatus = Literal["pending", "in_progress", "completed", "failed", "cancelled"]
 
 
-class ReservationRequestCreate(BaseModel):
-    """Schema for creating a reservation request from UI."""
+class RequestCreate(BaseModel):
+    """Schema for creating a base request."""
 
     user_id: UUID | None = None
-    party_size: int = Field(..., ge=1, le=20)
-    requested_date: date = Field(..., description="Date in YYYY-MM-DD format")
-    time_range_start: time = Field(..., description="Start of time range (HH:MM)")
-    time_range_end: time = Field(..., description="End of time range (HH:MM)")
-    special_requests: str | None = None
-    contact_phone: str | None = None
+    type: RequestType
 
 
-class ReservationRequest(BaseModel):
-    """Schema for a reservation request record."""
+class Request(BaseModel):
+    """Schema for a request record."""
 
     id: UUID
     user_id: UUID | None = None
-    party_size: int
-    requested_date: date
-    time_range_start: time
-    time_range_end: time
-    special_requests: str | None = None
-    contact_phone: str | None = None
-    status: ReservationRequestStatus = "pending"
+    type: RequestType
+    status: RequestStatus = "pending"
     created_at: datetime
 
 
@@ -108,7 +99,109 @@ class RequestRestaurant(BaseModel):
 
 
 # ============================================
-# CALL SCHEMAS (Enhanced with context)
+# TYPE-SPECIFIC DETAIL SCHEMAS
+# ============================================
+
+
+QueryCategory = Literal[
+    "hours", "wait_times", "menu", "pricing", "dietary", "allergens", "facilities"
+]
+
+FacilityCategory = Literal[
+    "outdoor", "private_rooms", "wheelchair", "high_chairs", "pet_friendly", "parking"
+]
+
+EventTypeEnum = Literal[
+    "birthday", "anniversary", "large_party", "catering", "event_space"
+]
+
+
+class ReservationDetailsCreate(BaseModel):
+    """Schema for reservation-specific details."""
+
+    request_id: UUID
+    party_size: int = Field(..., ge=1, le=20)
+    requested_date: date
+    time_range_start: time
+    time_range_end: time
+    special_requests: str | None = None
+    contact_phone: str | None = None
+
+
+class ReservationDetails(BaseModel):
+    """Schema for reservation detail record."""
+
+    id: UUID
+    request_id: UUID
+    party_size: int
+    requested_date: date
+    time_range_start: time
+    time_range_end: time
+    special_requests: str | None = None
+    contact_phone: str | None = None
+
+
+class InfoQueryDetailsCreate(BaseModel):
+    """Schema for info query-specific details."""
+
+    request_id: UUID
+    query_categories: list[QueryCategory]
+    specific_questions: str | None = None
+    facility_categories: list[FacilityCategory] | None = None
+
+
+class InfoQueryDetails(BaseModel):
+    """Schema for info query detail record."""
+
+    id: UUID
+    request_id: UUID
+    query_categories: list[str]
+    specific_questions: str | None = None
+    facility_categories: list[str] | None = None
+
+
+class EventInquiryDetailsCreate(BaseModel):
+    """Schema for event inquiry-specific details."""
+
+    request_id: UUID
+    event_type: EventTypeEnum
+    party_size: int | None = Field(default=None, ge=1)
+    preferred_date: date | None = None
+    budget_range: str | None = None
+    details: str | None = None
+
+
+class EventInquiryDetails(BaseModel):
+    """Schema for event inquiry detail record."""
+
+    id: UUID
+    request_id: UUID
+    event_type: str
+    party_size: int | None = None
+    preferred_date: date | None = None
+    budget_range: str | None = None
+    details: str | None = None
+
+
+class CancellationDetailsCreate(BaseModel):
+    """Schema for cancellation-specific details."""
+
+    request_id: UUID
+    reservation_id: UUID
+    reason: str | None = None
+
+
+class CancellationDetails(BaseModel):
+    """Schema for cancellation detail record."""
+
+    id: UUID
+    request_id: UUID
+    reservation_id: UUID | None = None
+    reason: str | None = None
+
+
+# ============================================
+# CALL SCHEMAS
 # ============================================
 
 
@@ -148,7 +241,7 @@ class CallUpdate(BaseModel):
 
 
 # ============================================
-# RESERVATION SCHEMAS (Enhanced with context)
+# RESERVATION SCHEMAS (outcome of type='reservation')
 # ============================================
 
 
@@ -164,8 +257,8 @@ class ReservationCreate(BaseModel):
     user_id: UUID | None = None
     restaurant_name: str
     party_size: int = Field(..., ge=1, le=20)
-    confirmed_date: date = Field(..., description="Confirmed date (YYYY-MM-DD)")
-    confirmed_time: time = Field(..., description="Confirmed time (HH:MM)")
+    confirmed_date: date
+    confirmed_time: time
     confirmation_code: str | None = None
     status: ReservationStatus = "confirmed"
     notes: str | None = None
@@ -207,6 +300,113 @@ class ReservationWithDetails(BaseModel):
     status: ReservationStatus = "confirmed"
     notes: str | None = None
     created_at: datetime
+
+
+# ============================================
+# TYPE-SPECIFIC RESULT SCHEMAS
+# ============================================
+
+
+class InfoResultCreate(BaseModel):
+    """Schema for creating an info query result."""
+
+    call_id: UUID
+    request_id: UUID
+    restaurant_id: UUID
+    operating_hours: str | None = None
+    wait_time_minutes: int | None = None
+    menu_highlights: str | None = None
+    pricing_info: str | None = None
+    dietary_options: dict[str, bool] | None = None
+    allergen_info: str | None = None
+    facilities: dict[str, bool] | None = None
+    raw_notes: str | None = None
+
+
+class InfoResult(BaseModel):
+    """Schema for an info query result record."""
+
+    id: UUID
+    call_id: UUID
+    request_id: UUID
+    restaurant_id: UUID
+    operating_hours: str | None = None
+    wait_time_minutes: int | None = None
+    menu_highlights: str | None = None
+    pricing_info: str | None = None
+    dietary_options: dict[str, bool] | None = None
+    allergen_info: str | None = None
+    facilities: dict[str, bool] | None = None
+    raw_notes: str | None = None
+    created_at: datetime
+
+
+class EventInquiryResultCreate(BaseModel):
+    """Schema for creating an event inquiry result."""
+
+    call_id: UUID
+    request_id: UUID
+    restaurant_id: UUID
+    available: bool
+    quoted_price: str | None = None
+    capacity: int | None = None
+    details: str | None = None
+    contact_name: str | None = None
+    contact_info: str | None = None
+
+
+class EventInquiryResult(BaseModel):
+    """Schema for an event inquiry result record."""
+
+    id: UUID
+    call_id: UUID
+    request_id: UUID
+    restaurant_id: UUID
+    available: bool
+    quoted_price: str | None = None
+    capacity: int | None = None
+    details: str | None = None
+    contact_name: str | None = None
+    contact_info: str | None = None
+    created_at: datetime
+
+
+class CancellationResultCreate(BaseModel):
+    """Schema for creating a cancellation result."""
+
+    call_id: UUID
+    request_id: UUID
+    reservation_id: UUID
+    confirmed: bool
+    cancellation_code: str | None = None
+    notes: str | None = None
+
+
+class CancellationResult(BaseModel):
+    """Schema for a cancellation result record."""
+
+    id: UUID
+    call_id: UUID
+    request_id: UUID
+    reservation_id: UUID | None = None
+    confirmed: bool
+    cancellation_code: str | None = None
+    notes: str | None = None
+    created_at: datetime
+
+
+# ============================================
+# CASCADE SCHEMAS
+# ============================================
+
+
+CascadeStatusType = Literal[
+    "idle", "running", "paused", "completed", "exhausted", "cancelled"
+]
+
+AttemptStatusType = Literal[
+    "pending", "calling", "succeeded", "failed", "skipped", "no_answer"
+]
 
 
 # ============================================

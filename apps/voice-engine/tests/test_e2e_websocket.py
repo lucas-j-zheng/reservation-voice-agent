@@ -415,9 +415,9 @@ class TestRequestContext:
     async def test_request_status_updated_on_start(
         self, mock_db, mock_websocket, mock_gemini
     ):
-        """Test that reservation request status is updated to in_progress."""
-        # Pre-create a reservation request
-        mock_db.table("reservation_requests").insert({
+        """Test that request status is updated to in_progress."""
+        # Pre-create a request
+        mock_db.table("requests").insert({
             "id": "req-status-test",
             "status": "pending",
         }).execute()
@@ -440,7 +440,7 @@ class TestRequestContext:
         except asyncio.TimeoutError:
             pass
 
-        requests = mock_db.get_data("reservation_requests")
+        requests = mock_db.get_data("requests")
         req = next((r for r in requests if r["id"] == "req-status-test"), None)
         assert req is not None
         assert req["status"] == "in_progress"

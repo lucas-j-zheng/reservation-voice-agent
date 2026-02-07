@@ -138,7 +138,7 @@ async def save_booking(context: CallContext, booking: BookingDetails) -> dict:
 
     # If this call is part of a request, update request status
     if context.get("request_id"):
-        client.table("reservation_requests").update(
+        client.table("requests").update(
             {"status": "completed"}
         ).eq("id", context["request_id"]).execute()
 

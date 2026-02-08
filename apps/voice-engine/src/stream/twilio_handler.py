@@ -254,7 +254,7 @@ class TwilioMediaHandler:
 
                 # If part of a request, update request status to in_progress
                 if self._request_id:
-                    self._db.table("reservation_requests").update(
+                    self._db.table("requests").update(
                         {"status": "in_progress"}
                     ).eq("id", self._request_id).execute()
             else:

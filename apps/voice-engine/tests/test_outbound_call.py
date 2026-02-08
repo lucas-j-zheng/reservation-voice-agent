@@ -21,6 +21,7 @@ from main import (
 from tests.conftest import (
     SAMPLE_USER,
     SAMPLE_RESTAURANT,
+    SAMPLE_REQUEST,
     SAMPLE_RESERVATION_REQUEST,
     MockQueryResult,
     MockTableQuery,
@@ -55,9 +56,9 @@ class TestOutboundCallEndpoint:
     async def test_initiate_outbound_call_request_not_found(
         self, async_client, app_with_mocks, mock_twilio_client
     ):
-        """Test 404 when reservation request doesn't exist."""
-        # Override db to return empty for reservation_requests
-        app_with_mocks.state.db._tables["reservation_requests"] = []
+        """Test 404 when request doesn't exist."""
+        # Override db to return empty for requests
+        app_with_mocks.state.db._tables["requests"] = []
 
         response = await async_client.post(
             "/api/calls/outbound",
@@ -68,7 +69,7 @@ class TestOutboundCallEndpoint:
         )
 
         assert response.status_code == 404
-        assert "Reservation request not found" in response.json()["detail"]
+        assert "Request not found" in response.json()["detail"]
 
     async def test_initiate_outbound_call_restaurant_not_found(
         self, async_client, app_with_mocks, mock_twilio_client
@@ -109,9 +110,9 @@ class TestOutboundCallEndpoint:
     async def test_initiate_outbound_call_wrong_status(
         self, async_client, app_with_mocks, mock_twilio_client
     ):
-        """Test 400 when reservation request has wrong status."""
-        app_with_mocks.state.db._tables["reservation_requests"] = [
-            {**SAMPLE_RESERVATION_REQUEST, "status": "completed"}
+        """Test 400 when request has wrong status."""
+        app_with_mocks.state.db._tables["requests"] = [
+            {**SAMPLE_REQUEST, "status": "completed"}
         ]
 
         response = await async_client.post(
@@ -129,8 +130,8 @@ class TestOutboundCallEndpoint:
         self, async_client, app_with_mocks, mock_twilio_client
     ):
         """Test that in_progress status is allowed for retry calls."""
-        app_with_mocks.state.db._tables["reservation_requests"] = [
-            {**SAMPLE_RESERVATION_REQUEST, "status": "in_progress"}
+        app_with_mocks.state.db._tables["requests"] = [
+            {**SAMPLE_REQUEST, "status": "in_progress"}
         ]
 
         response = await async_client.post(

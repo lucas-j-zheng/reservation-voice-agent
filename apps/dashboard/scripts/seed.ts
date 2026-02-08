@@ -5,7 +5,31 @@
  * Requires SUPABASE_URL and SUPABASE_SERVICE_KEY env vars.
  */
 
+import { readFileSync } from "fs";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
 import { createClient } from "@supabase/supabase-js";
+
+// Load env file (Next.js does this automatically, but tsx doesn't)
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const dashboardRoot = resolve(__dirname, "..");
+for (const name of [".env.local", ".env"]) {
+  try {
+    const envContent = readFileSync(resolve(dashboardRoot, name), "utf-8");
+    for (const line of envContent.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx === -1) continue;
+      const k = trimmed.slice(0, eqIdx);
+      const v = trimmed.slice(eqIdx + 1);
+      if (!process.env[k]) process.env[k] = v;
+    }
+    break;
+  } catch {
+    continue;
+  }
+}
 
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_KEY;
@@ -30,7 +54,7 @@ async function seed() {
 
   const { data: insertedRestaurants, error: rError } = await supabase
     .from("restaurants")
-    .upsert(restaurants, { onConflict: "phone" })
+    .insert(restaurants)
     .select();
 
   if (rError) {

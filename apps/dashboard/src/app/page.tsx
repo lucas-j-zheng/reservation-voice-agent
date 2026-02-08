@@ -1,30 +1,50 @@
+import DashboardStats from "@/components/home/DashboardStats";
+
 export default function HomePage() {
   return (
     <div className="p-8">
       <h1 className="text-2xl font-bold mb-2">Dashboard</h1>
-      <p className="text-[var(--color-text-secondary)]">
+      <p className="text-[var(--color-text-secondary)] mb-6">
         Overview of your voice agent activity.
       </p>
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-8">
-        <div className="bg-white rounded-xl border border-[var(--color-border)] p-6">
+      <DashboardStats />
+      <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+        <a
+          href="/new-request"
+          className="bg-white rounded-xl border border-[var(--color-border)] p-6 hover:border-[var(--color-primary)] transition-colors"
+        >
+          <h2 className="font-semibold mb-1">New Request</h2>
           <p className="text-sm text-[var(--color-text-secondary)]">
-            Total Requests
+            Create a reservation, ask a question, plan an event, or cancel.
           </p>
-          <p className="text-3xl font-bold mt-1">--</p>
-        </div>
-        <div className="bg-white rounded-xl border border-[var(--color-border)] p-6">
+        </a>
+        <a
+          href="/restaurants"
+          className="bg-white rounded-xl border border-[var(--color-border)] p-6 hover:border-[var(--color-primary)] transition-colors"
+        >
+          <h2 className="font-semibold mb-1">Restaurants</h2>
           <p className="text-sm text-[var(--color-text-secondary)]">
-            Confirmed Reservations
+            Manage your restaurant directory.
           </p>
-          <p className="text-3xl font-bold mt-1">--</p>
-        </div>
-        <div className="bg-white rounded-xl border border-[var(--color-border)] p-6">
+        </a>
+        <a
+          href="/reservations"
+          className="bg-white rounded-xl border border-[var(--color-border)] p-6 hover:border-[var(--color-primary)] transition-colors"
+        >
+          <h2 className="font-semibold mb-1">Reservations</h2>
           <p className="text-sm text-[var(--color-text-secondary)]">
-            Active Calls
+            View upcoming and past reservations.
           </p>
-          <p className="text-3xl font-bold mt-1">--</p>
-        </div>
+        </a>
+        <a
+          href="/history"
+          className="bg-white rounded-xl border border-[var(--color-border)] p-6 hover:border-[var(--color-primary)] transition-colors"
+        >
+          <h2 className="font-semibold mb-1">History</h2>
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            Browse all past requests and their outcomes.
+          </p>
+        </a>
       </div>
     </div>
   );

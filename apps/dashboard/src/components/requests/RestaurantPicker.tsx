@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState, useCallback } from "react";
 import type { Restaurant } from "@sam/api-contracts";
 
@@ -66,7 +67,7 @@ export default function RestaurantPicker({
   if (restaurants.length === 0) {
     return (
       <div className="p-4 rounded-lg bg-yellow-50 border border-yellow-200 text-yellow-800 text-sm">
-        No restaurants yet. <a href="/restaurants" className="underline">Add some first.</a>
+        No restaurants yet. <Link href="/restaurants" className="underline">Add some first.</Link>
       </div>
     );
   }

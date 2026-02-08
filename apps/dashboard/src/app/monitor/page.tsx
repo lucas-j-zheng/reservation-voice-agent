@@ -1,7 +1,8 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useState, useMemo, Suspense } from "react";
+import Link from "next/link";
 import CascadeMonitor from "@/components/monitor/CascadeMonitor";
 
 type RequestData = {
@@ -42,9 +43,9 @@ function MonitorContent() {
     return (
       <div className="mt-8 bg-white rounded-xl border border-[var(--color-border)] p-12 text-center text-[var(--color-text-secondary)]">
         No active request. Start one from the{" "}
-        <a href="/new-request" className="text-[var(--color-primary)] underline">
+        <Link href="/new-request" className="text-[var(--color-primary)] underline">
           New Request
-        </a>{" "}
+        </Link>{" "}
         page.
       </div>
     );
@@ -66,12 +67,16 @@ function MonitorContent() {
     );
   }
 
-  const restaurants = (request.request_restaurants || [])
-    .sort((a, b) => a.priority - b.priority)
-    .map((rr) => ({
-      id: rr.restaurants.id,
-      name: rr.restaurants.name,
-    }));
+  const restaurants = useMemo(
+    () =>
+      (request.request_restaurants || [])
+        .sort((a, b) => a.priority - b.priority)
+        .map((rr) => ({
+          id: rr.restaurants.id,
+          name: rr.restaurants.name,
+        })),
+    [request]
+  );
 
   const TYPE_LABELS: Record<string, string> = {
     reservation: "Reservation",

@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseClient } from "@/lib/supabase/server";
+import { ReservationStatusSchema } from "@sam/api-contracts";
+import { z } from "zod";
+
+const ReservationUpdateSchema = z.object({
+  status: ReservationStatusSchema.optional(),
+  notes: z.string().nullable().optional(),
+});
 
 export async function GET(
   _request: NextRequest,
@@ -13,7 +20,7 @@ export async function GET(
       .from("reservations")
       .select("*")
       .eq("id", id)
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
     if (!data) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -31,11 +38,12 @@ export async function PUT(
   try {
     const { id } = await params;
     const body = await request.json();
+    const parsed = ReservationUpdateSchema.parse(body);
     const supabase = getSupabaseClient();
 
     const { data, error } = await supabase
       .from("reservations")
-      .update(body)
+      .update(parsed)
       .eq("id", id)
       .select()
       .single();
@@ -43,6 +51,9 @@ export async function PUT(
     if (error) throw error;
     return NextResponse.json(data);
   } catch (e: unknown) {
+    if (e instanceof z.ZodError) {
+      return NextResponse.json({ error: "Invalid input", details: e.errors }, { status: 400 });
+    }
     const message = e instanceof Error ? e.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
   }

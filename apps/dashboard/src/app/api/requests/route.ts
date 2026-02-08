@@ -1,7 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseClient } from "@/lib/supabase/server";
-import { RequestTypeSchema } from "@sam/api-contracts";
+import {
+  RequestTypeSchema,
+  ReservationDetailsCreateSchema,
+  InfoQueryDetailsCreateSchema,
+  EventInquiryDetailsCreateSchema,
+  CancellationDetailsCreateSchema,
+} from "@sam/api-contracts";
 import { VOICE_ENGINE_URL } from "@/lib/constants";
+import { z } from "zod";
+
+const DETAIL_SCHEMA_MAP: Record<string, z.ZodType> = {
+  reservation: ReservationDetailsCreateSchema.omit({ request_id: true }),
+  info_query: InfoQueryDetailsCreateSchema.omit({ request_id: true }),
+  event_inquiry: EventInquiryDetailsCreateSchema.omit({ request_id: true }),
+  cancellation: CancellationDetailsCreateSchema.omit({ request_id: true }),
+};
 
 const DETAIL_TABLE_MAP: Record<string, string> = {
   reservation: "reservation_details",
@@ -56,12 +70,14 @@ export async function POST(request: NextRequest) {
 
     if (reqError) throw reqError;
 
-    // 2. Create type-specific details
-    const detailTable = DETAIL_TABLE_MAP[type];
-    if (detailTable && details) {
+    // 2. Validate + create type-specific details
+    const detailSchema = DETAIL_SCHEMA_MAP[type];
+    if (detailSchema && details) {
+      const parsedDetails = detailSchema.parse(details);
+      const detailTable = DETAIL_TABLE_MAP[type];
       const { error: detailError } = await supabase
-        .from(detailTable)
-        .insert({ ...details, request_id: req.id });
+        .from(detailTable!)
+        .insert({ ...parsedDetails, request_id: req.id });
 
       if (detailError) throw detailError;
     }
@@ -104,8 +120,8 @@ export async function POST(request: NextRequest) {
       { status: 201 }
     );
   } catch (e: unknown) {
-    if (e instanceof Error && e.name === "ZodError") {
-      return NextResponse.json({ error: "Invalid input", details: e }, { status: 400 });
+    if (e instanceof z.ZodError) {
+      return NextResponse.json({ error: "Invalid input", details: e.errors }, { status: 400 });
     }
     const message = e instanceof Error ? e.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });

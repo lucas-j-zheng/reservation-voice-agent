@@ -1,3 +1,4 @@
+import Link from "next/link";
 import DashboardStats from "@/components/home/DashboardStats";
 
 export default function HomePage() {
@@ -9,7 +10,7 @@ export default function HomePage() {
       </p>
       <DashboardStats />
       <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
-        <a
+        <Link
           href="/new-request"
           className="bg-white rounded-xl border border-[var(--color-border)] p-6 hover:border-[var(--color-primary)] transition-colors"
         >
@@ -17,8 +18,8 @@ export default function HomePage() {
           <p className="text-sm text-[var(--color-text-secondary)]">
             Create a reservation, ask a question, plan an event, or cancel.
           </p>
-        </a>
-        <a
+        </Link>
+        <Link
           href="/restaurants"
           className="bg-white rounded-xl border border-[var(--color-border)] p-6 hover:border-[var(--color-primary)] transition-colors"
         >
@@ -26,8 +27,8 @@ export default function HomePage() {
           <p className="text-sm text-[var(--color-text-secondary)]">
             Manage your restaurant directory.
           </p>
-        </a>
-        <a
+        </Link>
+        <Link
           href="/reservations"
           className="bg-white rounded-xl border border-[var(--color-border)] p-6 hover:border-[var(--color-primary)] transition-colors"
         >
@@ -35,8 +36,8 @@ export default function HomePage() {
           <p className="text-sm text-[var(--color-text-secondary)]">
             View upcoming and past reservations.
           </p>
-        </a>
-        <a
+        </Link>
+        <Link
           href="/history"
           className="bg-white rounded-xl border border-[var(--color-border)] p-6 hover:border-[var(--color-primary)] transition-colors"
         >
@@ -44,7 +45,7 @@ export default function HomePage() {
           <p className="text-sm text-[var(--color-text-secondary)]">
             Browse all past requests and their outcomes.
           </p>
-        </a>
+        </Link>
       </div>
     </div>
   );

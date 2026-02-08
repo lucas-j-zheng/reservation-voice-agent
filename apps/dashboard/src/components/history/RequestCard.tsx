@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { formatDateTime } from "@/lib/utils";
 import { REQUEST_STATUS_COLORS, REQUEST_STATUS_LABELS } from "@/lib/constants";
 
@@ -29,7 +30,7 @@ export default function RequestCard({ request }: { request: RequestWithRestauran
     .filter(Boolean);
 
   return (
-    <a
+    <Link
       href={`/monitor?request_id=${request.id}`}
       className="flex items-start gap-4 p-4 bg-white rounded-xl border border-[var(--color-border)] hover:border-gray-300 transition-colors"
     >
@@ -58,6 +59,6 @@ export default function RequestCard({ request }: { request: RequestWithRestauran
           {formatDateTime(request.created_at)}
         </div>
       </div>
-    </a>
+    </Link>
   );
 }

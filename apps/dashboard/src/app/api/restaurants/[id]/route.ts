@@ -13,7 +13,7 @@ export async function GET(
       .from("restaurants")
       .select("*")
       .eq("id", id)
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
     if (!data) {

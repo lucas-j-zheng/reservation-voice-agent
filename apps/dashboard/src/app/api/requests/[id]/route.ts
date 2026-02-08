@@ -28,7 +28,7 @@ export async function GET(
       .from("requests")
       .select("*, request_restaurants(*, restaurants(*))")
       .eq("id", id)
-      .single();
+      .maybeSingle();
 
     if (reqError) throw reqError;
     if (!req) {

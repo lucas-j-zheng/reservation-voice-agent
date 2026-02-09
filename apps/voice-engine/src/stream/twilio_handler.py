@@ -22,6 +22,7 @@ from audio_utils import transcode_mulaw_to_pcm, transcode_pcm_24k_to_mulaw
 from src.brain.gemini_client import GeminiLiveClient
 from src.tools import save_booking, report_no_availability, end_call, CallContext
 from src.db import get_db_client, PostgresClient
+from src.redis_client import get_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +290,24 @@ class TwilioMediaHandler:
         else:
             logger.warning(f"Unknown tool call: {tool_name}")
 
+    async def _publish_call_outcome(self, outcome: str, data: dict | None = None) -> None:
+        """Publish call outcome to Redis for the cascade orchestrator."""
+        redis = get_redis_client()
+        if not redis or not self.call_id:
+            return
+
+        import json
+        message = json.dumps({
+            "outcome": outcome,
+            "call_id": str(self.call_id),
+            "data": data or {},
+        })
+        try:
+            await redis.publish(f"call_complete:{self.call_id}", message)
+            logger.info(f"Published call outcome '{outcome}' for call {self.call_id}")
+        except Exception as e:
+            logger.error(f"Failed to publish call outcome: {e}")
+
     async def _execute_save_booking(self, tool_id: str, booking_args: dict) -> None:
         """Execute save_booking asynchronously and send response to Gemini."""
         if not self.call_id:
@@ -305,6 +324,9 @@ class TwilioMediaHandler:
             result = await save_booking(context, booking_args)
             self._booking_saved = True
             logger.info(f"Booking saved successfully: {result}")
+
+            # Signal orchestrator
+            await self._publish_call_outcome("succeeded", result)
 
             # Send tool response back to Gemini so it can confirm to the user
             if self._gemini:
@@ -334,6 +356,9 @@ class TwilioMediaHandler:
             result = await report_no_availability(context, args)
             logger.info(f"No availability reported: {result}")
 
+            # Signal orchestrator
+            await self._publish_call_outcome("no_availability", result)
+
             if self._gemini:
                 await self._gemini.send_tool_response(tool_id, "report_no_availability", result)
         except Exception as e:
@@ -359,6 +384,9 @@ class TwilioMediaHandler:
             context = self._get_call_context()
             result = await end_call(context, args)
             logger.info(f"Call ended: {result}")
+
+            # Signal orchestrator
+            await self._publish_call_outcome("failed", result)
 
             if self._gemini:
                 await self._gemini.send_tool_response(tool_id, "end_call", result)

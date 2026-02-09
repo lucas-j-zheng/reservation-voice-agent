@@ -3,8 +3,9 @@ Voice Engine Entry Point
 FastAPI application for handling Twilio WebSocket connections and Gemini Live API.
 """
 
-import os
+import asyncio
 import json
+import os
 import uuid
 import logging
 from pathlib import Path
@@ -13,19 +14,20 @@ from dotenv import load_dotenv
 # Load .env from project root
 env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(env_path)
-from fastapi import FastAPI, WebSocket, Request, HTTPException
-from fastapi.responses import Response
+from fastapi import FastAPI, WebSocket, Request, Form, HTTPException
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
 from starlette.websockets import WebSocketState
 from contextlib import asynccontextmanager
-from pydantic import BaseModel
 
 import redis.asyncio as redis
-from twilio.rest import Client as TwilioClient
-
 from src.brain.gemini_client import GeminiLiveClient
 from src.brain.prompts import build_outbound_prompt
 from src.stream.twilio_handler import TwilioMediaHandler
 from src.db import get_db_client, PostgresClient
+from src.redis_client import set_redis_client, get_redis_client as get_module_redis
+from src.orchestrator import CascadeOrchestrator
+from src.orchestrator.events import CASCADE_EVENTS_CHANNEL
 
 # Configure logging
 logging.basicConfig(
@@ -33,19 +35,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-
-# Pydantic models for outbound call API
-class InitiateOutboundCallRequest(BaseModel):
-    """Request to start an outbound call."""
-    request_id: str  # UUID of existing reservation_request
-    restaurant_id: str  # UUID of restaurant to call
-
-
-class InitiateOutboundCallResponse(BaseModel):
-    """Response from outbound call initiation."""
-    call_sid: str
-    status: str
 
 
 # In-memory fallback for call context when Redis is unavailable
@@ -82,6 +71,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize Redis connection pool
     app.state.redis = await get_redis_client()
+    set_redis_client(app.state.redis)
 
     yield
 
@@ -100,6 +90,24 @@ app = FastAPI(
     description="AI Voice Agent for Restaurant Reservations",
     lifespan=lifespan,
 )
+
+# Active cascade orchestrators keyed by request_id
+_active_cascades: dict[str, CascadeOrchestrator] = {}
+
+
+# ============================================
+# Pydantic models for cascade API
+# ============================================
+
+class CascadeStartBody(BaseModel):
+    request_id: str
+
+class CascadeRequestBody(BaseModel):
+    request_id: str
+
+class CascadeReorderBody(BaseModel):
+    request_id: str
+    restaurant_order: list[str]
 
 
 @app.get("/health")
@@ -211,126 +219,6 @@ async def _store_call_context(redis_client: redis.Redis | None, context_id: str,
     _call_context_store[context_id] = context
 
 
-@app.post("/api/calls/outbound", response_model=InitiateOutboundCallResponse)
-async def initiate_outbound_call(request: Request, body: InitiateOutboundCallRequest):
-    """
-    Initiate an outbound call for a reservation request.
-
-    1. Validates request_id exists and is pending/in_progress
-    2. Validates restaurant_id exists and has phone number
-    3. Stores call context in Redis
-    4. Initiates Twilio call
-    5. Returns call_sid for tracking
-    """
-    db = app.state.db
-    if not db:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    # Validate and fetch request
-    request_result = db.table("requests").select("*").eq("id", body.request_id).execute()
-    if not request_result.data:
-        raise HTTPException(status_code=404, detail="Request not found")
-
-    reservation_request = request_result.data[0]
-    if reservation_request.get("status") not in ("pending", "in_progress"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Request status is '{reservation_request.get('status')}', must be pending or in_progress"
-        )
-
-    # Fetch reservation details for this request
-    details_result = db.table("reservation_details").select("*").eq("request_id", body.request_id).execute()
-    reservation_details = details_result.data[0] if details_result.data else {}
-
-    # Validate and fetch restaurant
-    restaurant_result = db.table("restaurants").select("*").eq("id", body.restaurant_id).execute()
-    if not restaurant_result.data:
-        raise HTTPException(status_code=404, detail="Restaurant not found")
-
-    restaurant = restaurant_result.data[0]
-    if not restaurant.get("phone"):
-        raise HTTPException(status_code=400, detail="Restaurant has no phone number")
-
-    # Fetch user for name
-    user_result = db.table("users").select("*").eq("id", reservation_request.get("user_id")).execute()
-    user_name = "the customer"
-    contact_phone = ""
-    if user_result.data:
-        user = user_result.data[0]
-        user_name = user.get("name", "the customer")
-        contact_phone = user.get("phone", "")
-
-    # Generate context ID and store context
-    context_id = str(uuid.uuid4())
-
-    # Convert date/time objects to strings for JSON serialization
-    requested_date = reservation_details.get("requested_date", "")
-    time_range_start = reservation_details.get("time_range_start", "")
-    time_range_end = reservation_details.get("time_range_end", "")
-
-    if hasattr(requested_date, 'isoformat'):
-        requested_date = requested_date.isoformat()
-    if hasattr(time_range_start, 'isoformat'):
-        time_range_start = time_range_start.isoformat()
-    if hasattr(time_range_end, 'isoformat'):
-        time_range_end = time_range_end.isoformat()
-
-    call_context = {
-        "call_type": "outbound",
-        "request_id": body.request_id,
-        "restaurant_id": body.restaurant_id,
-        "restaurant_name": restaurant.get("name", "the restaurant"),
-        "user_name": user_name,
-        "party_size": reservation_details.get("party_size", 2),
-        "requested_date": str(requested_date) if requested_date else "",
-        "time_range_start": str(time_range_start) if time_range_start else "",
-        "time_range_end": str(time_range_end) if time_range_end else "",
-        "special_requests": reservation_details.get("special_requests", ""),
-        "contact_phone": contact_phone,
-    }
-
-    await _store_call_context(app.state.redis, context_id, call_context)
-    logger.info(f"Stored call context: {context_id}")
-
-    # Get host for TwiML webhook URL
-    host = request.headers.get("host", "localhost:8000")
-    protocol = "https" if "trycloudflare.com" in host else "http"
-
-    # Initialize Twilio client
-    twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    twilio_auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-    twilio_phone_number = os.getenv("TWILIO_PHONE_NUMBER")
-
-    if not all([twilio_account_sid, twilio_auth_token, twilio_phone_number]):
-        raise HTTPException(status_code=503, detail="Twilio credentials not configured")
-
-    twilio_client = TwilioClient(twilio_account_sid, twilio_auth_token)
-
-    try:
-        # Create the outbound call
-        call = twilio_client.calls.create(
-            to=restaurant.get("phone"),
-            from_=twilio_phone_number,
-            url=f"{protocol}://{host}/ws/twilio/outbound-twiml?context_id={context_id}",
-        )
-
-        logger.info(f"Initiated outbound call: {call.sid} to {restaurant.get('phone')}")
-
-        # Update request status
-        db.table("requests").update({
-            "status": "in_progress"
-        }).eq("id", body.request_id).execute()
-
-        return InitiateOutboundCallResponse(
-            call_sid=call.sid,
-            status="initiated"
-        )
-
-    except Exception as e:
-        logger.error(f"Failed to initiate outbound call: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to initiate call: {str(e)}")
-
-
 @app.post("/ws/twilio/outbound-twiml")
 async def twilio_outbound_twiml(request: Request):
     """
@@ -374,6 +262,206 @@ async def twilio_outbound_twiml(request: Request):
 
     logger.info(f"Outbound call answered - connecting to stream with context: {context_id}")
     return Response(content=twiml, media_type="application/xml")
+
+
+# ============================================
+# CASCADE API ENDPOINTS
+# ============================================
+
+
+@app.post("/api/cascade/start")
+async def cascade_start(body: CascadeStartBody):
+    """Start a cascade for a reservation request."""
+    if not app.state.db:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    request_id = body.request_id
+
+    if request_id in _active_cascades:
+        raise HTTPException(status_code=409, detail="Cascade already active for this request")
+
+    orchestrator = CascadeOrchestrator(app.state.db, request_id)
+    _active_cascades[request_id] = orchestrator
+    await orchestrator.start()
+
+    return {"status": "started", "request_id": request_id}
+
+
+@app.post("/api/cascade/pause")
+async def cascade_pause(body: CascadeRequestBody):
+    """Pause an active cascade."""
+    orchestrator = _active_cascades.get(body.request_id)
+    if not orchestrator:
+        raise HTTPException(status_code=404, detail="No active cascade for this request")
+    await orchestrator.pause()
+    return {"status": "paused", "request_id": body.request_id}
+
+
+@app.post("/api/cascade/resume")
+async def cascade_resume(body: CascadeRequestBody):
+    """Resume a paused cascade."""
+    orchestrator = _active_cascades.get(body.request_id)
+    if not orchestrator:
+        raise HTTPException(status_code=404, detail="No active cascade for this request")
+    await orchestrator.resume()
+    return {"status": "resumed", "request_id": body.request_id}
+
+
+@app.post("/api/cascade/skip")
+async def cascade_skip(body: CascadeRequestBody):
+    """Skip the current restaurant in the cascade."""
+    orchestrator = _active_cascades.get(body.request_id)
+    if not orchestrator:
+        raise HTTPException(status_code=404, detail="No active cascade for this request")
+    await orchestrator.skip()
+    return {"status": "skipping", "request_id": body.request_id}
+
+
+@app.post("/api/cascade/reorder")
+async def cascade_reorder(body: CascadeReorderBody):
+    """Reorder restaurants in the cascade."""
+    orchestrator = _active_cascades.get(body.request_id)
+    if not orchestrator:
+        raise HTTPException(status_code=404, detail="No active cascade for this request")
+    await orchestrator.reorder(body.restaurant_order)
+    return {"status": "reordered", "request_id": body.request_id}
+
+
+@app.post("/api/cascade/cancel")
+async def cascade_cancel(body: CascadeRequestBody):
+    """Cancel a cascade."""
+    orchestrator = _active_cascades.get(body.request_id)
+    if not orchestrator:
+        raise HTTPException(status_code=404, detail="No active cascade for this request")
+    await orchestrator.cancel()
+    _active_cascades.pop(body.request_id, None)
+    return {"status": "cancelled", "request_id": body.request_id}
+
+
+@app.get("/api/cascade/status/{request_id}")
+async def cascade_status(request_id: str):
+    """Get cascade status for a request."""
+    if not app.state.db:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    # Load request
+    req_result = app.state.db.table("requests").select("*").eq(
+        "id", request_id
+    ).execute()
+    if not req_result.data:
+        raise HTTPException(status_code=404, detail="Request not found")
+    req = req_result.data[0]
+
+    # Load restaurants
+    restaurants = app.state.db.table("request_restaurants").select("*").eq(
+        "request_id", request_id
+    ).order("priority", ascending=True).execute()
+
+    # Load recent events
+    events = app.state.db.table("cascade_events").select("*").eq(
+        "request_id", request_id
+    ).order("created_at", ascending=False).execute()
+
+    return {
+        "request_id": request_id,
+        "cascade_status": req.get("cascade_status", "idle"),
+        "current_restaurant_idx": req.get("current_restaurant_idx", 0),
+        "restaurants": restaurants.data,
+        "recent_events": events.data[:20],  # Last 20 events
+    }
+
+
+@app.get("/api/cascade/events/{request_id}")
+async def cascade_events_sse(request_id: str):
+    """SSE stream of cascade events for a request."""
+    redis_client = app.state.redis
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Redis unavailable for SSE")
+
+    async def event_generator():
+        pubsub = redis_client.pubsub()
+        channel = CASCADE_EVENTS_CHANNEL.format(request_id=request_id)
+        await pubsub.subscribe(channel)
+
+        try:
+            while True:
+                try:
+                    msg = await asyncio.wait_for(
+                        pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0),
+                        timeout=30.0,
+                    )
+                except asyncio.TimeoutError:
+                    # Send keepalive
+                    yield ": keepalive\n\n"
+                    continue
+
+                if msg is None:
+                    yield ": keepalive\n\n"
+                    continue
+
+                if msg["type"] != "message":
+                    continue
+
+                data = msg["data"]
+                if isinstance(data, bytes):
+                    data = data.decode()
+
+                yield f"data: {data}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await pubsub.unsubscribe(channel)
+            await pubsub.close()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/calls/status-callback")
+async def twilio_status_callback(
+    CallSid: str = Form(...),
+    CallStatus: str = Form(...),
+    CallDuration: str | None = Form(None),
+):
+    """
+    Twilio status callback endpoint.
+    Receives lifecycle events (initiated, ringing, answered, completed, busy, no-answer, failed).
+    Publishes to Redis so the cascade orchestrator can react.
+    """
+    logger.info(f"Twilio status callback: sid={CallSid} status={CallStatus} duration={CallDuration}")
+
+    # Update call record in database
+    if app.state.db:
+        try:
+            update_data: dict = {"twilio_status": CallStatus}
+            if CallDuration:
+                update_data["duration_seconds"] = int(CallDuration)
+            app.state.db.table("calls").update(update_data).eq("twilio_sid", CallSid).execute()
+        except Exception as e:
+            logger.error(f"Failed to update call status in DB: {e}")
+
+    # Publish to Redis for orchestrator
+    redis = app.state.redis
+    if redis:
+        import json
+        message = json.dumps({
+            "call_sid": CallSid,
+            "status": CallStatus,
+            "duration": CallDuration,
+        })
+        try:
+            await redis.publish(f"call_status:{CallSid}", message)
+        except Exception as e:
+            logger.error(f"Failed to publish call status to Redis: {e}")
+
+    return Response(status_code=204)
 
 
 if __name__ == "__main__":

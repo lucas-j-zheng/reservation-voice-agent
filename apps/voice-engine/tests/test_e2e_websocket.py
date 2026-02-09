@@ -391,8 +391,10 @@ class TestRequestContext:
         handler = TwilioMediaHandler(
             websocket=mock_websocket,
             db=mock_db,
-            request_id="req-context-test",
-            restaurant_id="rest-context-test",
+            call_context={
+                "request_id": "req-context-test",
+                "restaurant_id": "rest-context-test",
+            },
         )
 
         mock_websocket.send_connected()
@@ -425,7 +427,7 @@ class TestRequestContext:
         handler = TwilioMediaHandler(
             websocket=mock_websocket,
             db=mock_db,
-            request_id="req-status-test",
+            call_context={"request_id": "req-status-test"},
         )
 
         mock_websocket.send_connected()

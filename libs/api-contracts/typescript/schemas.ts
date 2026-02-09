@@ -72,11 +72,23 @@ export const RequestCreateSchema = z.object({
 });
 export type RequestCreate = z.infer<typeof RequestCreateSchema>;
 
+export const CascadeStatusSchema = z.enum([
+  "idle",
+  "running",
+  "paused",
+  "completed",
+  "exhausted",
+  "cancelled",
+]);
+export type CascadeStatus = z.infer<typeof CascadeStatusSchema>;
+
 export const RequestSchema = z.object({
   id: z.string().uuid(),
   user_id: z.string().uuid().nullable(),
   type: RequestTypeSchema,
   status: RequestStatusSchema,
+  cascade_status: CascadeStatusSchema.default("idle"),
+  current_restaurant_idx: z.number().int().default(0),
   created_at: z.string().datetime(),
 });
 export type Request = z.infer<typeof RequestSchema>;
@@ -88,11 +100,26 @@ export const RequestRestaurantCreateSchema = z.object({
 });
 export type RequestRestaurantCreate = z.infer<typeof RequestRestaurantCreateSchema>;
 
+export const AttemptStatusSchema = z.enum([
+  "pending",
+  "calling",
+  "succeeded",
+  "failed",
+  "skipped",
+  "no_answer",
+]);
+export type AttemptStatus = z.infer<typeof AttemptStatusSchema>;
+
 export const RequestRestaurantSchema = z.object({
   id: z.string().uuid(),
   request_id: z.string().uuid(),
   restaurant_id: z.string().uuid(),
   priority: z.number().int(),
+  attempt_status: AttemptStatusSchema.default("pending"),
+  attempt_count: z.number().int().default(0),
+  last_call_id: z.string().uuid().nullable(),
+  failure_reason: z.string().nullable(),
+  attempted_at: z.string().datetime().nullable(),
 });
 export type RequestRestaurant = z.infer<typeof RequestRestaurantSchema>;
 
@@ -226,6 +253,8 @@ export const CallSchema = z.object({
   request_id: z.string().uuid().nullable(),
   restaurant_id: z.string().uuid().nullable(),
   status: CallStatusSchema,
+  twilio_status: z.string().nullable(),
+  attempt_number: z.number().int().default(1),
   failure_reason: z.string().nullable(),
   duration_seconds: z.number().int().nullable(),
   transcript_summary: z.string().nullable(),
@@ -392,30 +421,6 @@ export const CancellationResultSchema = z.object({
 export type CancellationResult = z.infer<typeof CancellationResultSchema>;
 
 // ============================================
-// CASCADE SCHEMAS
-// ============================================
-
-export const CascadeStatusSchema = z.enum([
-  "idle",
-  "running",
-  "paused",
-  "completed",
-  "exhausted",
-  "cancelled",
-]);
-export type CascadeStatus = z.infer<typeof CascadeStatusSchema>;
-
-export const AttemptStatusSchema = z.enum([
-  "pending",
-  "calling",
-  "succeeded",
-  "failed",
-  "skipped",
-  "no_answer",
-]);
-export type AttemptStatus = z.infer<typeof AttemptStatusSchema>;
-
-// ============================================
 // TOOL RESPONSE SCHEMAS
 // ============================================
 
@@ -441,6 +446,104 @@ export const EndCallResponseSchema = z.object({
   call_summary: z.string().nullable().optional(),
 });
 export type EndCallResponse = z.infer<typeof EndCallResponseSchema>;
+
+// ============================================
+// CASCADE EVENT SCHEMAS
+// ============================================
+
+export const CascadeEventTypeSchema = z.enum([
+  "cascade_started",
+  "restaurant_calling",
+  "restaurant_succeeded",
+  "restaurant_failed",
+  "restaurant_no_answer",
+  "restaurant_skipped",
+  "cascade_paused",
+  "cascade_resumed",
+  "cascade_completed",
+  "cascade_exhausted",
+  "cascade_cancelled",
+]);
+export type CascadeEventType = z.infer<typeof CascadeEventTypeSchema>;
+
+export const CascadeEventSchema = z.object({
+  id: z.string().uuid(),
+  request_id: z.string().uuid(),
+  event_type: CascadeEventTypeSchema,
+  restaurant_id: z.string().uuid().nullable(),
+  call_id: z.string().uuid().nullable(),
+  data: z.record(z.unknown()).default({}),
+  created_at: z.string().datetime(),
+});
+export type CascadeEvent = z.infer<typeof CascadeEventSchema>;
+
+// ============================================
+// NOTIFICATION SCHEMAS
+// ============================================
+
+export const NotificationChannelSchema = z.enum(["sms", "push", "email"]);
+export type NotificationChannel = z.infer<typeof NotificationChannelSchema>;
+
+export const NotificationTypeSchema = z.enum([
+  "cascade_started",
+  "restaurant_trying",
+  "reservation_confirmed",
+  "cascade_exhausted",
+  "cascade_cancelled",
+]);
+export type NotificationType = z.infer<typeof NotificationTypeSchema>;
+
+export const NotificationStatusSchema = z.enum(["pending", "sent", "failed"]);
+export type NotificationStatus = z.infer<typeof NotificationStatusSchema>;
+
+export const NotificationSchema = z.object({
+  id: z.string().uuid(),
+  request_id: z.string().uuid(),
+  user_id: z.string().uuid().nullable(),
+  channel: NotificationChannelSchema.default("sms"),
+  notification_type: NotificationTypeSchema,
+  message: z.string(),
+  status: NotificationStatusSchema.default("pending"),
+  sent_at: z.string().datetime().nullable(),
+  created_at: z.string().datetime(),
+});
+export type Notification = z.infer<typeof NotificationSchema>;
+
+// ============================================
+// CASCADE API SCHEMAS
+// ============================================
+
+export const CascadeStartRequestSchema = z.object({
+  request_id: z.string().uuid(),
+});
+export type CascadeStartRequest = z.infer<typeof CascadeStartRequestSchema>;
+
+export const CascadeReorderRequestSchema = z.object({
+  request_id: z.string().uuid(),
+  restaurant_order: z.array(z.string().uuid()),
+});
+export type CascadeReorderRequest = z.infer<typeof CascadeReorderRequestSchema>;
+
+export const CascadeStatusResponseSchema = z.object({
+  request_id: z.string().uuid(),
+  cascade_status: CascadeStatusSchema,
+  current_restaurant_idx: z.number().int(),
+  restaurants: z.array(RequestRestaurantSchema),
+  recent_events: z.array(CascadeEventSchema),
+});
+export type CascadeStatusResponse = z.infer<typeof CascadeStatusResponseSchema>;
+
+export const CascadeSSEEventSchema = z.object({
+  request_id: z.string().uuid(),
+  request_type: z.string().default("reservation"),
+  event_type: CascadeEventTypeSchema,
+  restaurant_id: z.string().uuid().nullable(),
+  restaurant_name: z.string().nullable(),
+  call_id: z.string().uuid().nullable(),
+  data: z.record(z.unknown()).default({}),
+  timestamp: z.string().datetime(),
+});
+export type CascadeSSEEvent = z.infer<typeof CascadeSSEEventSchema>;
 
 // ============================================
 // LEGACY SUPPORT (for backward compatibility)

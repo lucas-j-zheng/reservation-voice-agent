@@ -6,7 +6,6 @@ FastAPI application for handling Twilio WebSocket connections and Gemini Live AP
 import asyncio
 import json
 import os
-import uuid
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
@@ -15,6 +14,7 @@ from dotenv import load_dotenv
 env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 load_dotenv(env_path)
 from fastapi import FastAPI, WebSocket, Request, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.websockets import WebSocketState
@@ -23,6 +23,11 @@ from contextlib import asynccontextmanager
 import redis.asyncio as redis
 from src.brain.gemini_client import GeminiLiveClient
 from src.brain.prompts import build_outbound_prompt
+from src.call_context_store import (
+    _call_context_store,
+    get_call_context,
+    store_call_context,
+)
 from src.stream.twilio_handler import TwilioMediaHandler
 from src.db import get_db_client, PostgresClient
 from src.redis_client import set_redis_client, get_redis_client as get_module_redis
@@ -35,10 +40,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-
-# In-memory fallback for call context when Redis is unavailable
-_call_context_store: dict[str, dict] = {}
 
 
 def get_database_client() -> PostgresClient | None:
@@ -89,6 +90,15 @@ app = FastAPI(
     title="Sam Voice Engine",
     description="AI Voice Agent for Restaurant Reservations",
     lifespan=lifespan,
+)
+
+# Allow dashboard (localhost:3000) to make requests to voice engine
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Active cascade orchestrators keyed by request_id
@@ -145,12 +155,32 @@ async def twilio_websocket(websocket: WebSocket):
     """
     Twilio Media Stream WebSocket endpoint.
     Receives 8kHz μ-law audio, transcodes to 16kHz LPCM16, streams to Gemini.
-    Supports both inbound and outbound calls via context_id query param.
+    Supports both inbound and outbound calls via context_id query param or
+    Twilio customParameters (fallback when reverse proxy strips query params).
     """
     await websocket.accept()
 
-    # Check for outbound call context via query params
+    # Try query params first (may be stripped by Cloudflare tunnel / reverse proxy)
     context_id = websocket.query_params.get("context_id")
+
+    # If no query param, pre-read messages to find context_id in customParameters
+    buffered_messages: list[str] = []
+    if not context_id:
+        logger.info("No context_id in query params — reading start message for customParameters")
+        for _ in range(5):
+            try:
+                msg_text = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+                buffered_messages.append(msg_text)
+                data = json.loads(msg_text)
+                if data.get("event") == "start":
+                    custom_params = data.get("start", {}).get("customParameters", {})
+                    context_id = custom_params.get("context_id")
+                    if context_id:
+                        logger.info(f"Found context_id in customParameters: {context_id}")
+                    break
+            except (asyncio.TimeoutError, json.JSONDecodeError):
+                break
+
     call_context = None
     system_prompt = None
 
@@ -158,19 +188,28 @@ async def twilio_websocket(websocket: WebSocket):
         # Outbound call - retrieve context
         call_context = await _get_call_context(app.state.redis, context_id)
         if call_context:
-            logger.info(f"Outbound call with context: {context_id}")
-            # Build system prompt from context
-            system_prompt = build_outbound_prompt(
-                user_name=call_context.get("user_name", "the customer"),
-                restaurant_name=call_context.get("restaurant_name", "the restaurant"),
-                party_size=call_context.get("party_size", 2),
-                preferred_date=call_context.get("requested_date", ""),
-                preferred_time=call_context.get("time_range_start", ""),
-                time_range_start=call_context.get("time_range_start", ""),
-                time_range_end=call_context.get("time_range_end", ""),
-                contact_phone=call_context.get("contact_phone", ""),
-                special_requests=call_context.get("special_requests", ""),
+            logger.info(
+                f"Outbound call context loaded: context_id={context_id}, "
+                f"request_id={call_context.get('request_id')}, "
+                f"restaurant={call_context.get('restaurant_name')}"
             )
+            # Use pre-built system prompt if available (e.g., from cascade orchestrator)
+            system_prompt = call_context.get("system_prompt")
+            if not system_prompt:
+                # Fallback: build prompt from context fields
+                system_prompt = build_outbound_prompt(
+                    user_name=call_context.get("user_name", "the customer"),
+                    restaurant_name=call_context.get("restaurant_name", "the restaurant"),
+                    party_size=call_context.get("party_size", 2),
+                    preferred_date=call_context.get("requested_date", ""),
+                    preferred_time=call_context.get("time_range_start", ""),
+                    time_range_start=call_context.get("time_range_start", ""),
+                    time_range_end=call_context.get("time_range_end", ""),
+                    contact_phone=call_context.get("contact_phone", ""),
+                    special_requests=call_context.get("special_requests", ""),
+                )
+        else:
+            logger.warning(f"Outbound call context NOT FOUND for context_id={context_id}")
 
     # Use shared db client from app.state
     handler = TwilioMediaHandler(
@@ -181,42 +220,31 @@ async def twilio_websocket(websocket: WebSocket):
     )
     gemini = GeminiLiveClient(system_prompt=system_prompt)
 
+    logger.info(
+        f"Starting WebSocket handler: context_id={context_id}, "
+        f"has_system_prompt={system_prompt is not None}"
+    )
+
     try:
-        await handler.handle_stream(gemini)
+        await handler.handle_stream(gemini, buffered_messages=buffered_messages)
+    except Exception as e:
+        logger.error(
+            f"WebSocket handler error: context_id={context_id}, error={e}",
+            exc_info=True,
+        )
     finally:
         if websocket.client_state == WebSocketState.CONNECTED:
             await websocket.close()
 
 
 async def _get_call_context(redis_client: redis.Redis | None, context_id: str) -> dict | None:
-    """Retrieve call context from Redis or in-memory fallback."""
-    if redis_client:
-        try:
-            data = await redis_client.get(f"call_context:{context_id}")
-            if data:
-                return json.loads(data)
-        except Exception as e:
-            logger.warning(f"Failed to get context from Redis: {e}")
-
-    # Fallback to in-memory store
-    return _call_context_store.get(context_id)
+    """Compatibility wrapper for tests and internal callers."""
+    return await get_call_context(redis_client, context_id)
 
 
 async def _store_call_context(redis_client: redis.Redis | None, context_id: str, context: dict) -> None:
-    """Store call context in Redis or in-memory fallback."""
-    if redis_client:
-        try:
-            await redis_client.setex(
-                f"call_context:{context_id}",
-                300,  # 5 minute TTL
-                json.dumps(context)
-            )
-            return
-        except Exception as e:
-            logger.warning(f"Failed to store context in Redis: {e}")
-
-    # Fallback to in-memory store
-    _call_context_store[context_id] = context
+    """Compatibility wrapper for tests and internal callers."""
+    await store_call_context(redis_client, context_id, context)
 
 
 @app.post("/ws/twilio/outbound-twiml")
@@ -379,6 +407,43 @@ async def cascade_events_sse(request_id: str):
         raise HTTPException(status_code=503, detail="Redis unavailable for SSE")
 
     async def event_generator():
+        # Replay historical events from DB so client catches up
+        if app.state.db:
+            try:
+                hist = app.state.db.table("cascade_events").select("*").eq(
+                    "request_id", request_id
+                ).order("created_at", ascending=True).execute()
+                rows = hist.data or []
+
+                # Batch-fetch restaurant names for all referenced restaurant_ids
+                restaurant_ids = list({r["restaurant_id"] for r in rows if r.get("restaurant_id")})
+                name_map = {}
+                if restaurant_ids:
+                    try:
+                        res = app.state.db.table("restaurants").select("id,name").execute()
+                        for r in (res.data or []):
+                            if r["id"] in restaurant_ids:
+                                name_map[r["id"]] = r["name"]
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch restaurant names for SSE replay: {e}")
+
+                for row in rows:
+                    rid = row.get("restaurant_id")
+                    payload = json.dumps({
+                        "event": row.get("event_type"),
+                        "request_id": row.get("request_id"),
+                        "request_type": "reservation",
+                        "restaurant_id": rid,
+                        "restaurant_name": name_map.get(rid) if rid else None,
+                        "call_id": row.get("call_id"),
+                        "data": json.loads(row["data"]) if isinstance(row.get("data"), str) else (row.get("data") or {}),
+                        "timestamp": row.get("created_at"),
+                    })
+                    yield f"data: {payload}\n\n"
+            except Exception as e:
+                logger.error(f"Failed to replay historical events: {e}")
+
+        # Subscribe to Redis for live events
         pubsub = redis_client.pubsub()
         channel = CASCADE_EVENTS_CHANNEL.format(request_id=request_id)
         await pubsub.subscribe(channel)
@@ -411,7 +476,7 @@ async def cascade_events_sse(request_id: str):
             pass
         finally:
             await pubsub.unsubscribe(channel)
-            await pubsub.close()
+            await pubsub.aclose()
 
     return StreamingResponse(
         event_generator(),

@@ -132,6 +132,88 @@ class TestCascadeStateMachine:
 
 
 # ============================================================================
+# Outbound Call Context Guard Tests
+# ============================================================================
+
+
+class TestOutboundCallContextGuard:
+    """Ensure outbound calls are only dialed when context is retrievable."""
+
+    @pytest.mark.asyncio
+    async def test_place_call_aborts_when_context_unavailable(self, mock_db):
+        from src.orchestrator.cascade import CascadeOrchestrator
+
+        req = make_request(mock_db)
+        restaurant = make_restaurant(mock_db, "Restaurant A", "+15551111111")
+        orch = CascadeOrchestrator(mock_db, req["id"])
+
+        mock_twilio = MagicMock()
+        mock_call = MagicMock()
+        mock_call.sid = "CA_should_not_happen"
+        mock_twilio.calls.create.return_value = mock_call
+
+        def getenv_side_effect(key: str, default=None):
+            values = {
+                "TWILIO_ACCOUNT_SID": "AC_test",
+                "TWILIO_AUTH_TOKEN": "token_test",
+                "TWILIO_PHONE_NUMBER": "+15550000000",
+                "BASE_URL": "http://localhost:8000",
+            }
+            return values.get(key, default)
+
+        with patch("twilio.rest.Client", return_value=mock_twilio):
+            with patch("src.orchestrator.cascade.os.getenv", side_effect=getenv_side_effect):
+                with patch("src.orchestrator.cascade.get_redis_client", return_value=None):
+                    with patch("src.orchestrator.cascade.store_call_context", new_callable=AsyncMock) as store_ctx:
+                        with patch("src.orchestrator.cascade.get_call_context", new_callable=AsyncMock, return_value=None) as get_ctx:
+                            result = await orch._place_call(req, restaurant, attempt_number=1)
+
+        assert result is None
+        store_ctx.assert_awaited_once()
+        get_ctx.assert_awaited_once()
+        mock_twilio.calls.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_place_call_dials_when_context_retrievable(self, mock_db):
+        from src.orchestrator.cascade import CascadeOrchestrator
+
+        req = make_request(mock_db)
+        restaurant = make_restaurant(mock_db, "Restaurant B", "+15552222222")
+        orch = CascadeOrchestrator(mock_db, req["id"])
+
+        mock_twilio = MagicMock()
+        mock_call = MagicMock()
+        mock_call.sid = "CA_test_success"
+        mock_twilio.calls.create.return_value = mock_call
+
+        stored_context = {
+            "request_id": req["id"],
+            "restaurant_id": restaurant["id"],
+            "restaurant_name": restaurant["name"],
+        }
+
+        def getenv_side_effect(key: str, default=None):
+            values = {
+                "TWILIO_ACCOUNT_SID": "AC_test",
+                "TWILIO_AUTH_TOKEN": "token_test",
+                "TWILIO_PHONE_NUMBER": "+15550000000",
+                "BASE_URL": "http://localhost:8000",
+            }
+            return values.get(key, default)
+
+        with patch("twilio.rest.Client", return_value=mock_twilio):
+            with patch("src.orchestrator.cascade.os.getenv", side_effect=getenv_side_effect):
+                with patch("src.orchestrator.cascade.get_redis_client", return_value=None):
+                    with patch("src.orchestrator.cascade.store_call_context", new_callable=AsyncMock):
+                        with patch("src.orchestrator.cascade.get_call_context", new_callable=AsyncMock, return_value=stored_context):
+                            result = await orch._place_call(req, restaurant, attempt_number=1)
+
+        assert result == "CA_test_success"
+        mock_twilio.calls.create.assert_called_once()
+        assert "context_id=" in mock_twilio.calls.create.call_args.kwargs["url"]
+
+
+# ============================================================================
 # Restaurant Ordering Tests
 # ============================================================================
 
@@ -233,7 +315,7 @@ class TestEventBus:
         channel, payload = mock_redis.publish.call_args.args
         assert channel == "cascade_events:req-456"
         data = json.loads(payload)
-        assert data["event_type"] == "restaurant_calling"
+        assert data["event"] == "restaurant_calling"
         assert data["request_type"] == "reservation"
         assert data["restaurant_name"] == "Test Restaurant"
 
@@ -562,7 +644,7 @@ class TestSSEEvents:
 
         assert published_data is not None
         assert published_data["request_type"] == "reservation"
-        assert published_data["event_type"] == "restaurant_calling"
+        assert published_data["event"] == "restaurant_calling"
         assert published_data["restaurant_name"] == "SSE Test Restaurant"
         assert "timestamp" in published_data
 

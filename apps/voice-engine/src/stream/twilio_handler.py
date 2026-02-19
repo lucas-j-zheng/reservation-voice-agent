@@ -121,12 +121,32 @@ class TwilioMediaHandler:
         self._restaurant_name = self._call_context.get("restaurant_name")
         self._user_id = self._call_context.get("user_id")
 
-    async def handle_stream(self, gemini: GeminiLiveClient) -> None:
+    async def handle_stream(
+        self,
+        gemini: GeminiLiveClient,
+        buffered_messages: list[str] | None = None,
+    ) -> None:
         """
         Main loop for handling Twilio media stream.
         Processes incoming audio and routes to Gemini.
+
+        Args:
+            gemini: The Gemini Live API client.
+            buffered_messages: Messages pre-read during context discovery
+                that need to be replayed before the live stream.
         """
-        await gemini.connect()
+        try:
+            await gemini.connect()
+        except Exception as e:
+            logger.error(
+                f"Failed to connect to Gemini Live API: {e}",
+                exc_info=True,
+            )
+            # Notify cascade orchestrator so it can advance to the next restaurant
+            await self._publish_call_outcome("failed", {"reason": f"Gemini connection failed: {e}"})
+            raise
+
+        logger.info("Successfully connected to Gemini Live API")
         self._running = True
         self._gemini = gemini  # Store reference for tool responses
 
@@ -140,6 +160,12 @@ class TwilioMediaHandler:
         ]
 
         try:
+            # Replay any messages buffered during context discovery
+            if buffered_messages:
+                logger.info(f"Replaying {len(buffered_messages)} buffered message(s)")
+                for msg in buffered_messages:
+                    await self._process_message(msg, gemini)
+
             async for message in self.websocket.iter_text():
                 await self._process_message(message, gemini)
         finally:
@@ -186,8 +212,17 @@ class TwilioMediaHandler:
                 # Create call record in database
                 await self._create_call_record()
 
-                # Send initial prompt to trigger Gemini's greeting
-                await gemini.send_text("The call has connected. Please introduce yourself and ask how you can help.")
+                # For outbound calls, send a text prompt to make Gemini speak first.
+                # The restaurant's initial greeting is lost in the Twilio→WebSocket
+                # setup gap, so we can't rely on VAD to trigger the first response.
+                if self._call_context:
+                    logger.info("Outbound call — sending text prompt to trigger Gemini greeting")
+                    await gemini.send_text(
+                        "The restaurant has answered the phone. Introduce yourself now "
+                        "and state the reservation request as specified in your instructions."
+                    )
+                else:
+                    logger.info("Inbound call — waiting for caller audio to trigger Gemini via VAD")
             except ValidationError as e:
                 logger.error(f"Invalid start message: {e}")
                 return
@@ -209,7 +244,6 @@ class TwilioMediaHandler:
 
             # Transcode and send to Gemini
             pcm_audio = transcode_mulaw_to_pcm(mulaw_audio)
-            logger.debug(f"Sending {len(pcm_audio)} bytes to Gemini (from {len(mulaw_audio)} mulaw)")
             await gemini.send_audio(pcm_audio)
 
         elif event == "stop":
@@ -226,7 +260,7 @@ class TwilioMediaHandler:
             logger.debug(f"Ignoring unknown event type: {event}")
 
     async def _create_call_record(self) -> None:
-        """Create a call record in the database."""
+        """Create a call record in the database, or look up existing one."""
         if not self._db:
             logger.warning("Database not available - skipping call record creation")
             return
@@ -262,7 +296,21 @@ class TwilioMediaHandler:
                 logger.error("Failed to create call record - no data returned")
 
         except Exception as e:
-            logger.error(f"Error creating call record: {e}")
+            # Handle duplicate key (cascade orchestrator already created the record)
+            error_str = str(e)
+            if "23505" in error_str or "duplicate" in error_str.lower():
+                logger.info(f"Call record already exists for twilio_sid={self.call_sid}, looking up")
+                try:
+                    existing = self._db.table("calls").select("id").eq(
+                        "twilio_sid", self.call_sid
+                    ).execute()
+                    if existing.data:
+                        self.call_id = existing.data[0]["id"]
+                        logger.info(f"Found existing call record: {self.call_id}")
+                except Exception as lookup_err:
+                    logger.error(f"Failed to look up existing call record: {lookup_err}")
+            else:
+                logger.error(f"Error creating call record: {e}")
 
     def _get_call_context(self) -> CallContext:
         """Build the call context for tool execution."""
@@ -385,8 +433,9 @@ class TwilioMediaHandler:
             result = await end_call(context, args)
             logger.info(f"Call ended: {result}")
 
-            # Signal orchestrator
-            await self._publish_call_outcome("failed", result)
+            # Only signal orchestrator if save_booking hasn't already signaled success
+            if not self._booking_saved:
+                await self._publish_call_outcome("failed", result)
 
             if self._gemini:
                 await self._gemini.send_tool_response(tool_id, "end_call", result)

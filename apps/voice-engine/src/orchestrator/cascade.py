@@ -7,27 +7,20 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 
 import redis.asyncio as aioredis
 
 from src.db import PostgresClient
+from src.call_context_store import get_call_context, store_call_context
 from src.redis_client import get_redis_client
-from src.brain.prompts import build_reservation_prompt
-from src.tools import SAVE_BOOKING_SCHEMA, REPORT_NO_AVAILABILITY_SCHEMA, END_CALL_SCHEMA
+from src.brain.prompts import build_cascade_reservation_prompt
 from .state import CascadeStatus, AttemptStatus, CallOutcome
 from .events import EventBus
 from .notifications import NotificationService
 
 logger = logging.getLogger(__name__)
-
-# Type-aware routing — ready for multi-type support on dashboard merge
-PROMPT_MAP = {
-    "reservation": build_reservation_prompt,
-}
-TOOL_MAP = {
-    "reservation": [SAVE_BOOKING_SCHEMA, REPORT_NO_AVAILABILITY_SCHEMA, END_CALL_SCHEMA],
-}
 
 # How long to wait for a call outcome before treating as no-answer
 CALL_OUTCOME_TIMEOUT = 120  # seconds
@@ -394,11 +387,49 @@ class CascadeOrchestrator:
 
             client = Client(sid, token)
 
-            # Build the TwiML URL that will connect to our WebSocket
-            # The voice engine's /ws/twilio endpoint returns TwiML that connects
-            # to the WebSocket stream
-            base_url = os.getenv("BASE_URL", "http://localhost:8000")
-            twiml_url = f"{base_url}/ws/twilio"
+            base_url = os.getenv("TUNNEL_URL") or os.getenv("BASE_URL", "http://localhost:8000")
+
+            # Build cascade system prompt with reservation details
+            system_prompt = build_cascade_reservation_prompt(
+                party_size=req.get("party_size", 2),
+                preferred_date=str(req.get("requested_date", "")),
+                time_range_start=req.get("time_range_start", ""),
+                time_range_end=req.get("time_range_end", ""),
+                restaurant_name=restaurant["name"],
+                contact_phone=req.get("contact_phone", ""),
+                special_requests=req.get("special_requests"),
+            )
+
+            # Store call context so the WebSocket handler can retrieve it
+            context_id = str(uuid.uuid4())
+            context = {
+                "request_id": self._request_id,
+                "restaurant_id": str(restaurant.get("id", "")),
+                "restaurant_name": restaurant["name"],
+                "user_id": str(req["user_id"]) if req.get("user_id") else "",
+                "party_size": req.get("party_size", 2),
+                "requested_date": str(req.get("requested_date", "")),
+                "time_range_start": req.get("time_range_start", ""),
+                "time_range_end": req.get("time_range_end", ""),
+                "contact_phone": req.get("contact_phone", ""),
+                "special_requests": req.get("special_requests", ""),
+                "system_prompt": system_prompt,
+            }
+
+            redis = get_redis_client()
+            await store_call_context(redis, context_id, context)
+
+            # Verify context is retrievable before dialing to avoid deterministic TwiML failure.
+            stored_context = await get_call_context(redis, context_id)
+            if not stored_context:
+                logger.error(
+                    "Call context unavailable after store attempt; aborting outbound dial "
+                    f"for restaurant {restaurant['name']} (context: {context_id})"
+                )
+                return None
+
+            # Use the outbound TwiML endpoint that passes context to the WebSocket
+            twiml_url = f"{base_url}/ws/twilio/outbound-twiml?context_id={context_id}"
             status_callback_url = f"{base_url}/api/calls/status-callback"
 
             call = client.calls.create(
@@ -410,7 +441,7 @@ class CascadeOrchestrator:
                 timeout=NO_ANSWER_TIMEOUT,
             )
 
-            logger.info(f"Placed outbound call: {call.sid} to {restaurant['phone']}")
+            logger.info(f"Placed outbound call: {call.sid} to {restaurant['phone']} (context: {context_id})")
             return call.sid
 
         except Exception as e:
@@ -511,15 +542,42 @@ class CascadeOrchestrator:
                     elif status == "failed":
                         return CallOutcome.FAILED
                     # "completed" without a tool signal means the call ended
-                    # without save_booking — wait a bit for tool signal
+                    # without save_booking — poll for tool signal during grace period
                     elif status == "completed":
-                        # Give tool signals 5s to arrive
-                        await asyncio.sleep(5)
+                        grace_deadline = asyncio.get_event_loop().time() + 5
+                        while asyncio.get_event_loop().time() < grace_deadline:
+                            grace_remaining = grace_deadline - asyncio.get_event_loop().time()
+                            if grace_remaining <= 0:
+                                break
+                            try:
+                                tool_msg = await asyncio.wait_for(
+                                    pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5),
+                                    timeout=min(grace_remaining, 1.0),
+                                )
+                            except asyncio.TimeoutError:
+                                continue
+                            if tool_msg and tool_msg["type"] == "message":
+                                ch = tool_msg["channel"]
+                                if isinstance(ch, bytes):
+                                    ch = ch.decode()
+                                if call_id and ch == f"call_complete:{call_id}":
+                                    d = tool_msg["data"]
+                                    if isinstance(d, bytes):
+                                        d = d.decode()
+                                    try:
+                                        p = json.loads(d)
+                                        outcome_str = p.get("outcome", "failed")
+                                        if outcome_str == "succeeded":
+                                            return CallOutcome.SUCCEEDED
+                                        elif outcome_str == "no_availability":
+                                            return CallOutcome.NO_AVAILABILITY
+                                    except json.JSONDecodeError:
+                                        pass
                         return CallOutcome.FAILED
 
         finally:
             await pubsub.unsubscribe(*channels)
-            await pubsub.close()
+            await pubsub.aclose()
 
     # ------------------------------------------------------------------ #
     # DB helpers

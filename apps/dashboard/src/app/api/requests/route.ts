@@ -97,22 +97,28 @@ export async function POST(request: NextRequest) {
 
     // 4. Try to proxy to voice-engine cascade API (best-effort)
     let cascadeStarted = false;
+    const cascadeUrl = `${VOICE_ENGINE_URL}/api/cascade/start`;
+    console.log(`[cascade-start] Calling ${cascadeUrl} for request ${req.id}`);
     try {
-      const cascadeRes = await fetch(`${VOICE_ENGINE_URL}/api/cascade/start`, {
+      const cascadeRes = await fetch(cascadeUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ request_id: req.id }),
-        signal: AbortSignal.timeout(3000),
+        signal: AbortSignal.timeout(5000),
       });
       if (cascadeRes.ok) {
         cascadeStarted = true;
+        console.log(`[cascade-start] Success for request ${req.id}`);
         await supabase
           .from("requests")
           .update({ status: "in_progress" })
           .eq("id", req.id);
+      } else {
+        const errBody = await cascadeRes.text();
+        console.error(`[cascade-start] Voice engine returned ${cascadeRes.status}: ${errBody}`);
       }
-    } catch {
-      // Voice engine not available - that's fine, request is saved
+    } catch (cascadeErr) {
+      console.error("[cascade-start] Failed to start cascade:", cascadeErr);
     }
 
     return NextResponse.json(

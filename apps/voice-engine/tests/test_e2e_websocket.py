@@ -161,10 +161,10 @@ class TestWebSocketMessageProcessing:
         assert handler.stream_sid == "MZ-test-012"
         assert handler.call_sid == "CA-test-789"
 
-    async def test_start_event_triggers_gemini_greeting(
+    async def test_inbound_start_event_does_not_send_text(
         self, mock_db, mock_websocket, mock_gemini
     ):
-        """Test that start event sends text to Gemini to trigger greeting."""
+        """Test that inbound calls do NOT send text prompt — VAD-triggered."""
         handler = TwilioMediaHandler(
             websocket=mock_websocket,
             db=mock_db,
@@ -182,10 +182,39 @@ class TestWebSocketMessageProcessing:
         except asyncio.TimeoutError:
             pass
 
-        # Verify greeting prompt was sent
+        # Inbound calls: no text sent — relies on VAD via audio stream
         texts = mock_gemini.get_received_text()
-        assert len(texts) >= 1
-        assert "connected" in texts[0].lower() or "introduce" in texts[0].lower()
+        assert len(texts) == 0
+
+    async def test_outbound_start_event_sends_text_prompt(
+        self, mock_db, mock_websocket, mock_gemini
+    ):
+        """Test that outbound calls send a text prompt to trigger Gemini greeting."""
+        handler = TwilioMediaHandler(
+            websocket=mock_websocket,
+            db=mock_db,
+            call_context={
+                "request_id": "req-outbound",
+                "restaurant_name": "Test Restaurant",
+            },
+        )
+
+        mock_websocket.send_connected()
+        mock_websocket.send_start()
+        mock_websocket.close_stream()
+
+        try:
+            await asyncio.wait_for(
+                handler.handle_stream(mock_gemini),
+                timeout=1.0
+            )
+        except asyncio.TimeoutError:
+            pass
+
+        # Outbound calls: text prompt sent to trigger greeting
+        texts = mock_gemini.get_received_text()
+        assert len(texts) == 1
+        assert "restaurant" in texts[0].lower() or "introduce" in texts[0].lower()
 
     async def test_media_event_sends_audio_to_gemini(
         self, mock_db, mock_websocket, mock_gemini

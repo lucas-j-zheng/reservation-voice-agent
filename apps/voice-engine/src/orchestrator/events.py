@@ -63,9 +63,9 @@ class EventBus:
         redis = get_redis_client()
         if redis:
             sse_payload = {
+                "event": event_type,
                 "request_id": request_id,
                 "request_type": request_type,
-                "event_type": event_type,
                 "restaurant_id": restaurant_id,
                 "restaurant_name": restaurant_name,
                 "call_id": call_id,

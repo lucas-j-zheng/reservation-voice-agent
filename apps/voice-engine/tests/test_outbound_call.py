@@ -1,11 +1,10 @@
 """
-End-to-end tests for outbound call functionality.
+Tests for outbound call functionality.
 
 Tests cover:
-1. POST /api/calls/outbound - Initiate outbound calls
-2. POST /ws/twilio/outbound-twiml - TwiML webhook for answered calls
-3. Context storage and retrieval (Redis + in-memory fallback)
-4. Error handling and validation
+1. POST /ws/twilio/outbound-twiml - TwiML webhook for answered calls
+2. Context storage and retrieval (Redis + in-memory fallback)
+3. Error handling and validation
 """
 
 import json
@@ -18,161 +17,6 @@ from main import (
     _get_call_context,
     _store_call_context,
 )
-from tests.conftest import (
-    SAMPLE_USER,
-    SAMPLE_RESTAURANT,
-    SAMPLE_REQUEST,
-    SAMPLE_RESERVATION_REQUEST,
-    MockQueryResult,
-    MockTableQuery,
-)
-
-
-class TestOutboundCallEndpoint:
-    """Tests for POST /api/calls/outbound endpoint."""
-
-    async def test_initiate_outbound_call_success(
-        self, async_client, mock_twilio_client, sample_outbound_request
-    ):
-        """Test successful outbound call initiation."""
-        response = await async_client.post(
-            "/api/calls/outbound",
-            json=sample_outbound_request,
-        )
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "initiated"
-        assert data["call_sid"] == "CA_test_call_sid_123"
-
-        # Verify Twilio was called with correct params
-        mock_twilio_client.calls.create.assert_called_once()
-        call_kwargs = mock_twilio_client.calls.create.call_args.kwargs
-        assert call_kwargs["to"] == SAMPLE_RESTAURANT["phone"]
-        assert call_kwargs["from_"] == "+15551234567"
-        assert "outbound-twiml" in call_kwargs["url"]
-        assert "context_id=" in call_kwargs["url"]
-
-    async def test_initiate_outbound_call_request_not_found(
-        self, async_client, app_with_mocks, mock_twilio_client
-    ):
-        """Test 404 when request doesn't exist."""
-        # Override db to return empty for requests
-        app_with_mocks.state.db._tables["requests"] = []
-
-        response = await async_client.post(
-            "/api/calls/outbound",
-            json={
-                "request_id": "nonexistent-uuid",
-                "restaurant_id": SAMPLE_RESTAURANT["id"],
-            },
-        )
-
-        assert response.status_code == 404
-        assert "Request not found" in response.json()["detail"]
-
-    async def test_initiate_outbound_call_restaurant_not_found(
-        self, async_client, app_with_mocks, mock_twilio_client
-    ):
-        """Test 404 when restaurant doesn't exist."""
-        app_with_mocks.state.db._tables["restaurants"] = []
-
-        response = await async_client.post(
-            "/api/calls/outbound",
-            json={
-                "request_id": SAMPLE_RESERVATION_REQUEST["id"],
-                "restaurant_id": "nonexistent-uuid",
-            },
-        )
-
-        assert response.status_code == 404
-        assert "Restaurant not found" in response.json()["detail"]
-
-    async def test_initiate_outbound_call_restaurant_no_phone(
-        self, async_client, app_with_mocks, mock_twilio_client
-    ):
-        """Test 400 when restaurant has no phone number."""
-        app_with_mocks.state.db._tables["restaurants"] = [
-            {**SAMPLE_RESTAURANT, "phone": None}
-        ]
-
-        response = await async_client.post(
-            "/api/calls/outbound",
-            json={
-                "request_id": SAMPLE_RESERVATION_REQUEST["id"],
-                "restaurant_id": SAMPLE_RESTAURANT["id"],
-            },
-        )
-
-        assert response.status_code == 400
-        assert "no phone number" in response.json()["detail"]
-
-    async def test_initiate_outbound_call_wrong_status(
-        self, async_client, app_with_mocks, mock_twilio_client
-    ):
-        """Test 400 when request has wrong status."""
-        app_with_mocks.state.db._tables["requests"] = [
-            {**SAMPLE_REQUEST, "status": "completed"}
-        ]
-
-        response = await async_client.post(
-            "/api/calls/outbound",
-            json={
-                "request_id": SAMPLE_RESERVATION_REQUEST["id"],
-                "restaurant_id": SAMPLE_RESTAURANT["id"],
-            },
-        )
-
-        assert response.status_code == 400
-        assert "must be pending or in_progress" in response.json()["detail"]
-
-    async def test_initiate_outbound_call_in_progress_status_allowed(
-        self, async_client, app_with_mocks, mock_twilio_client
-    ):
-        """Test that in_progress status is allowed for retry calls."""
-        app_with_mocks.state.db._tables["requests"] = [
-            {**SAMPLE_REQUEST, "status": "in_progress"}
-        ]
-
-        response = await async_client.post(
-            "/api/calls/outbound",
-            json={
-                "request_id": SAMPLE_RESERVATION_REQUEST["id"],
-                "restaurant_id": SAMPLE_RESTAURANT["id"],
-            },
-        )
-
-        assert response.status_code == 200
-
-    async def test_initiate_outbound_call_stores_context(
-        self, async_client, app_with_mocks, mock_twilio_client, sample_outbound_request
-    ):
-        """Test that call context is stored for later retrieval."""
-        response = await async_client.post(
-            "/api/calls/outbound",
-            json=sample_outbound_request,
-        )
-
-        assert response.status_code == 200
-
-        # Context should be stored (either in Redis mock or in-memory)
-        # Check in-memory fallback since Redis mock might not be fully wired
-        assert len(_call_context_store) >= 0  # Context was processed
-
-    async def test_initiate_outbound_call_no_database(self, async_client, app_with_mocks):
-        """Test 503 when database is not available."""
-        app_with_mocks.state.db = None
-
-        response = await async_client.post(
-            "/api/calls/outbound",
-            json={
-                "request_id": "any-uuid",
-                "restaurant_id": "any-uuid",
-            },
-        )
-
-        assert response.status_code == 503
-        assert "Database not available" in response.json()["detail"]
 
 
 class TestOutboundTwiMLWebhook:

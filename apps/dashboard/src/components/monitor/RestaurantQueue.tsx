@@ -36,17 +36,21 @@ export default function RestaurantQueue({
       if (e.restaurant_id !== r.id) continue;
       switch (e.event) {
         case "calling_restaurant":
+        case "restaurant_calling":
           status = "calling";
           break;
         case "call_completed_success":
+        case "restaurant_succeeded":
           status = "succeeded";
           data = e.data;
           break;
         case "call_completed_failure":
+        case "restaurant_failed":
           status = "failed";
           data = e.data;
           break;
         case "call_no_answer":
+        case "restaurant_no_answer":
           status = "no_answer";
           break;
         case "restaurant_skipped":

@@ -63,6 +63,16 @@ class GeminiLiveClient:
             # Enable transcriptions for logging
             "input_audio_transcription": {},
             "output_audio_transcription": {},
+            # Explicit VAD config — prevents silent backend default changes
+            # and ensures audio detection works reliably across turns.
+            "realtime_input_config": {
+                "automatic_activity_detection": {
+                    "disabled": False,
+                    "start_of_speech_sensitivity": "START_SENSITIVITY_HIGH",
+                    "end_of_speech_sensitivity": "END_SENSITIVITY_LOW",
+                    "silence_duration_ms": 500,
+                }
+            },
         }
 
         logger.info(f"Connecting to Gemini Live API with model: {self.model}")
@@ -90,7 +100,10 @@ class GeminiLiveClient:
         if not audio_chunk:
             return
 
-        logger.debug(f"Sending audio to Gemini: {len(audio_chunk)} bytes")
+        self._audio_chunks_sent = getattr(self, '_audio_chunks_sent', 0) + 1
+        # Log every 50th chunk to avoid spam but confirm audio is flowing
+        if self._audio_chunks_sent % 50 == 1:
+            logger.info(f"Audio flowing to Gemini: chunk #{self._audio_chunks_sent}, {len(audio_chunk)} bytes")
 
         # Send audio as realtime input with proper MIME type
         # Gemini expects 16kHz, 16-bit PCM, little-endian
@@ -181,7 +194,7 @@ class GeminiLiveClient:
                                 logger.info(f"Yielding audio chunk: {len(part.inline_data.data)} bytes")
                                 yield part.inline_data.data
 
-                logger.debug("Turn completed, waiting for next turn...")
+                logger.info("Turn completed, looping back to receive next turn...")
 
         except Exception as e:
             logger.error(f"Error receiving audio: {e}")

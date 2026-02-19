@@ -24,6 +24,7 @@ export function useCascadeEvents(
   });
   const [useSimulator, setUseSimulator] = useState(false);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const receivedRealEvent = useRef(false);
 
   const handleEvent = useCallback((event: CascadeEvent) => {
     setState((prev) => {
@@ -36,11 +37,23 @@ export function useCascadeEvents(
           status = "running";
           break;
         case "calling_restaurant":
+        case "restaurant_calling":
           currentRestaurantId = event.restaurant_id ?? null;
           break;
         case "call_completed_success":
+        case "restaurant_succeeded":
+          if (currentRestaurantId === event.restaurant_id) {
+            currentRestaurantId = null;
+          }
+          break;
         case "call_completed_failure":
+        case "restaurant_failed":
+          if (currentRestaurantId === event.restaurant_id) {
+            currentRestaurantId = null;
+          }
+          break;
         case "call_no_answer":
+        case "restaurant_no_answer":
           if (currentRestaurantId === event.restaurant_id) {
             currentRestaurantId = null;
           }
@@ -69,31 +82,33 @@ export function useCascadeEvents(
     });
   }, []);
 
-  // Try SSE first, fall back to simulator
+  // Try SSE first, fall back to simulator only if SSE never delivers data
   useEffect(() => {
     if (!requestId) return;
 
     // Reset state
     setState({ status: "idle", events: [], currentRestaurantId: null, error: null });
+    receivedRealEvent.current = false;
+    setUseSimulator(false);
 
-    // Try real SSE connection
     let eventSource: EventSource | null = null;
-    let sseTimedOut = false;
+    let failCount = 0;
 
+    // Only fall back to simulator after repeated failures with no data
     const sseTimeout = setTimeout(() => {
-      sseTimedOut = true;
-      if (eventSource) {
-        eventSource.close();
+      if (!receivedRealEvent.current) {
+        eventSource?.close();
+        setUseSimulator(true);
       }
-      // Fall back to simulator
-      setUseSimulator(true);
-    }, 3000);
+    }, 5000);
 
     try {
-      eventSource = new EventSource(`${VOICE_ENGINE_URL}/api/cascade/${requestId}/events`);
+      eventSource = new EventSource(`${VOICE_ENGINE_URL}/api/cascade/events/${requestId}`);
 
       eventSource.onmessage = (e) => {
         clearTimeout(sseTimeout);
+        receivedRealEvent.current = true;
+        failCount = 0;
         try {
           const event: CascadeEvent = JSON.parse(e.data);
           handleEvent(event);
@@ -103,17 +118,16 @@ export function useCascadeEvents(
       };
 
       eventSource.onerror = () => {
-        if (!sseTimedOut) {
+        failCount++;
+        // If we already received real events, don't switch to simulator.
+        // EventSource auto-reconnects. Only give up after many failures with no data.
+        if (!receivedRealEvent.current && failCount >= 3) {
           clearTimeout(sseTimeout);
           eventSource?.close();
           setUseSimulator(true);
         }
       };
 
-      eventSource.onopen = () => {
-        clearTimeout(sseTimeout);
-        setUseSimulator(false);
-      };
     } catch {
       clearTimeout(sseTimeout);
       setUseSimulator(true);
@@ -143,39 +157,46 @@ export function useCascadeEvents(
     };
   }, [useSimulator, requestId, requestType, restaurants, handleEvent]);
 
+  const cascadePost = useCallback(async (action: string, body: Record<string, string>) => {
+    return fetch(`${VOICE_ENGINE_URL}/api/cascade/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }, []);
+
   const pause = useCallback(async () => {
     if (!requestId) return;
     try {
-      await fetch(`${VOICE_ENGINE_URL}/api/cascade/${requestId}/pause`, { method: "POST" });
+      await cascadePost("pause", { request_id: requestId });
     } catch {
-      // Simulate pause locally
       handleEvent({ event: "cascade_paused", request_id: requestId, request_type: requestType, timestamp: new Date().toISOString() });
     }
-  }, [requestId, requestType, handleEvent]);
+  }, [requestId, requestType, handleEvent, cascadePost]);
 
   const resume = useCallback(async () => {
     if (!requestId) return;
     try {
-      await fetch(`${VOICE_ENGINE_URL}/api/cascade/${requestId}/resume`, { method: "POST" });
+      await cascadePost("resume", { request_id: requestId });
     } catch {
       handleEvent({ event: "cascade_resumed", request_id: requestId, request_type: requestType, timestamp: new Date().toISOString() });
     }
-  }, [requestId, requestType, handleEvent]);
+  }, [requestId, requestType, handleEvent, cascadePost]);
 
   const cancel = useCallback(async () => {
     if (!requestId) return;
     cleanupRef.current?.();
     try {
-      await fetch(`${VOICE_ENGINE_URL}/api/cascade/${requestId}/cancel`, { method: "POST" });
+      await cascadePost("cancel", { request_id: requestId });
     } catch {
       handleEvent({ event: "cascade_cancelled", request_id: requestId, request_type: requestType, timestamp: new Date().toISOString() });
     }
-  }, [requestId, requestType, handleEvent]);
+  }, [requestId, requestType, handleEvent, cascadePost]);
 
   const skip = useCallback(async () => {
     if (!requestId || !state.currentRestaurantId) return;
     try {
-      await fetch(`${VOICE_ENGINE_URL}/api/cascade/${requestId}/skip`, { method: "POST" });
+      await cascadePost("skip", { request_id: requestId });
     } catch {
       handleEvent({
         event: "restaurant_skipped",
@@ -185,7 +206,7 @@ export function useCascadeEvents(
         timestamp: new Date().toISOString(),
       });
     }
-  }, [requestId, requestType, state.currentRestaurantId, handleEvent]);
+  }, [requestId, requestType, state.currentRestaurantId, handleEvent, cascadePost]);
 
   return {
     ...state,

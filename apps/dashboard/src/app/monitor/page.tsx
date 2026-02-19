@@ -39,6 +39,20 @@ function MonitorContent() {
     load();
   }, [requestId]);
 
+  const restaurants = useMemo(
+    () =>
+      request
+        ? (request.request_restaurants || [])
+            .filter((rr) => rr.restaurants)
+            .sort((a, b) => a.priority - b.priority)
+            .map((rr) => ({
+              id: rr.restaurants.id,
+              name: rr.restaurants.name,
+            }))
+        : [],
+    [request]
+  );
+
   if (!requestId) {
     return (
       <div className="mt-8 bg-white rounded-xl border border-[var(--color-border)] p-12 text-center text-[var(--color-text-secondary)]">
@@ -66,17 +80,6 @@ function MonitorContent() {
       </div>
     );
   }
-
-  const restaurants = useMemo(
-    () =>
-      (request.request_restaurants || [])
-        .sort((a, b) => a.priority - b.priority)
-        .map((rr) => ({
-          id: rr.restaurants.id,
-          name: rr.restaurants.name,
-        })),
-    [request]
-  );
 
   const TYPE_LABELS: Record<string, string> = {
     reservation: "Reservation",

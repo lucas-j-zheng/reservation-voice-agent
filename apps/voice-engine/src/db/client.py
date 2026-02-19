@@ -31,11 +31,12 @@ class TableQuery:
         self._table = table_name
         self._operation: str | None = None
         self._data: dict | None = None
-        self._filters: list[tuple[str, str, Any]] = []
         self._select_columns: str = "*"
+        self._filters: list[tuple[str, str, Any]] = []
+        self._order_by: list[tuple[str, bool]] = []  # (column, ascending)
 
     def select(self, columns: str = "*") -> "TableQuery":
-        """Select columns from the table."""
+        """Select columns (starts a SELECT query)."""
         self._operation = "select"
         self._select_columns = columns
         return self
@@ -55,6 +56,11 @@ class TableQuery:
     def eq(self, column: str, value: Any) -> "TableQuery":
         """Add equality filter."""
         self._filters.append((column, "=", value))
+        return self
+
+    def order(self, column: str, ascending: bool = True) -> "TableQuery":
+        """Add ORDER BY clause."""
+        self._order_by.append((column, ascending))
         return self
 
     def execute(self) -> QueryResult:
@@ -83,10 +89,18 @@ class TableQuery:
             where_clause = "WHERE " + " AND ".join(conditions)
             values = [val for _, _, val in self._filters]
 
+        order_clause = ""
+        if self._order_by:
+            parts = []
+            for col, asc in self._order_by:
+                parts.append(f"{col} {'ASC' if asc else 'DESC'}")
+            order_clause = "ORDER BY " + ", ".join(parts)
+
         query = f"""
             SELECT {self._select_columns}
             FROM {self._table}
             {where_clause}
+            {order_clause}
         """
         cur.execute(query, values)
         rows = cur.fetchall()
@@ -129,6 +143,31 @@ class TableQuery:
         row = cur.fetchone()
         return QueryResult([dict(row)] if row else [])
 
+    def _execute_select(self, cur) -> QueryResult:
+        """Execute SELECT and return matching rows."""
+        values = []
+
+        where_clause = ""
+        if self._filters:
+            conditions = [f"{col} {op} %s" for col, op, _ in self._filters]
+            where_clause = "WHERE " + " AND ".join(conditions)
+            values.extend([val for _, _, val in self._filters])
+
+        order_clause = ""
+        if self._order_by:
+            parts = [f"{col} {'ASC' if asc else 'DESC'}" for col, asc in self._order_by]
+            order_clause = "ORDER BY " + ", ".join(parts)
+
+        query = f"""
+            SELECT {self._select_columns}
+            FROM {self._table}
+            {where_clause}
+            {order_clause}
+        """
+        cur.execute(query, values)
+        rows = cur.fetchall()
+        return QueryResult([dict(row) for row in rows])
+
 
 class PostgresClient:
     """
@@ -169,12 +208,57 @@ class PostgresClient:
             logger.info("PostgresClient connection closed")
 
 
-def get_db_client() -> PostgresClient | None:
+class SupabaseQueryWrapper:
+    """
+    Wraps a Supabase postgrest query builder to normalize the
+    order() signature to match PostgresClient's (ascending=True).
+    """
+
+    def __init__(self, builder):
+        self._builder = builder
+
+    def select(self, columns: str = "*") -> "SupabaseQueryWrapper":
+        return SupabaseQueryWrapper(self._builder.select(columns))
+
+    def insert(self, data: dict) -> "SupabaseQueryWrapper":
+        return SupabaseQueryWrapper(self._builder.insert(data))
+
+    def update(self, data: dict) -> "SupabaseQueryWrapper":
+        return SupabaseQueryWrapper(self._builder.update(data))
+
+    def eq(self, column: str, value: Any) -> "SupabaseQueryWrapper":
+        return SupabaseQueryWrapper(self._builder.eq(column, value))
+
+    def order(self, column: str, ascending: bool = True) -> "SupabaseQueryWrapper":
+        return SupabaseQueryWrapper(self._builder.order(column, desc=not ascending))
+
+    def execute(self):
+        return self._builder.execute()
+
+
+class SupabaseClientWrapper:
+    """
+    Wraps the Supabase client so .table() returns our normalized
+    SupabaseQueryWrapper with a consistent order() signature.
+    """
+
+    def __init__(self, client):
+        self._client = client
+
+    def table(self, name: str) -> SupabaseQueryWrapper:
+        return SupabaseQueryWrapper(self._client.table(name))
+
+    def close(self) -> None:
+        # Supabase SDK doesn't need explicit close
+        pass
+
+
+def get_db_client() -> PostgresClient | SupabaseClientWrapper | None:
     """
     Get database client from environment.
 
     Checks for DATABASE_URL first (direct Postgres),
-    falls back to SUPABASE_URL if available.
+    falls back to SUPABASE_URL + SUPABASE_SERVICE_KEY.
     """
     database_url = os.getenv("DATABASE_URL")
 
@@ -187,7 +271,20 @@ def get_db_client() -> PostgresClient | None:
             return client
         except Exception as e:
             logger.error(f"Failed to connect to Postgres: {e}")
+            # Fall through to try Supabase
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+    if supabase_url and supabase_key:
+        try:
+            from supabase import create_client
+            client = create_client(supabase_url, supabase_key)
+            logger.info(f"Connected to Supabase at {supabase_url}")
+            return SupabaseClientWrapper(client)
+        except Exception as e:
+            logger.error(f"Failed to connect to Supabase: {e}")
             return None
 
-    logger.warning("DATABASE_URL not set - database disabled")
+    logger.warning("No database credentials set - database disabled")
     return None

@@ -368,7 +368,7 @@ class TestConcurrencyErrors:
         handler = TwilioMediaHandler(
             websocket=mock_websocket,
             db=mock_db,
-            restaurant_name="Test Restaurant",
+            call_context={"restaurant_name": "Test Restaurant"},
         )
 
         # Create call record
@@ -437,10 +437,12 @@ class TestEdgeCases:
         handler = TwilioMediaHandler(
             websocket=mock_websocket,
             db=mock_db,
-            request_id="req-full",
-            restaurant_id="rest-full",
-            restaurant_name="Full Context Restaurant",
-            user_id="user-full",
+            call_context={
+                "request_id": "req-full",
+                "restaurant_id": "rest-full",
+                "restaurant_name": "Full Context Restaurant",
+                "user_id": "user-full",
+            },
         )
 
         context = handler._get_call_context()

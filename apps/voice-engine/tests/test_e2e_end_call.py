@@ -301,7 +301,7 @@ class TestCallStatusOnStreamEnd:
         handler = TwilioMediaHandler(
             websocket=mock_websocket,
             db=mock_db,
-            restaurant_name="Test Restaurant",
+            call_context={"restaurant_name": "Test Restaurant"},
         )
 
         # Simulate booking was saved

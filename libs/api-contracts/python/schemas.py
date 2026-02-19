@@ -62,6 +62,7 @@ class Restaurant(BaseModel):
 
 RequestType = Literal["reservation", "info_query", "event_inquiry", "cancellation"]
 RequestStatus = Literal["pending", "in_progress", "completed", "failed", "cancelled"]
+CascadeStatus = Literal["idle", "running", "paused", "completed", "exhausted", "cancelled"]
 
 
 class RequestCreate(BaseModel):
@@ -78,6 +79,8 @@ class Request(BaseModel):
     user_id: UUID | None = None
     type: RequestType
     status: RequestStatus = "pending"
+    cascade_status: CascadeStatus = "idle"
+    current_restaurant_idx: int = 0
     created_at: datetime
 
 
@@ -89,13 +92,21 @@ class RequestRestaurantCreate(BaseModel):
     priority: int = Field(default=1, ge=1)
 
 
+AttemptStatus = Literal["pending", "calling", "succeeded", "failed", "skipped", "no_answer"]
+
+
 class RequestRestaurant(BaseModel):
-    """Schema for request-restaurant junction."""
+    """Schema for request-restaurant junction with cascade tracking."""
 
     id: UUID
     request_id: UUID
     restaurant_id: UUID
     priority: int
+    attempt_status: AttemptStatus = "pending"
+    attempt_count: int = 0
+    last_call_id: UUID | None = None
+    failure_reason: str | None = None
+    attempted_at: datetime | None = None
 
 
 # ============================================
@@ -224,6 +235,8 @@ class Call(BaseModel):
     request_id: UUID | None = None
     restaurant_id: UUID | None = None
     status: CallStatus
+    twilio_status: str | None = None
+    attempt_number: int = 1
     failure_reason: str | None = None
     duration_seconds: int | None = None
     transcript_summary: str | None = None
@@ -438,6 +451,134 @@ class EndCallResponse(BaseModel):
     success: bool
     reason: str
     call_summary: str | None = None
+
+
+# ============================================
+# LEGACY SUPPORT (for backward compatibility)
+# ============================================
+
+
+# ============================================
+# CASCADE EVENT SCHEMAS
+# ============================================
+
+
+CascadeEventType = Literal[
+    "cascade_started",
+    "restaurant_calling",
+    "restaurant_succeeded",
+    "restaurant_failed",
+    "restaurant_no_answer",
+    "restaurant_skipped",
+    "cascade_paused",
+    "cascade_resumed",
+    "cascade_completed",
+    "cascade_exhausted",
+    "cascade_cancelled",
+]
+
+
+class CascadeEvent(BaseModel):
+    """Schema for a cascade event record."""
+
+    id: UUID
+    request_id: UUID
+    event_type: CascadeEventType
+    restaurant_id: UUID | None = None
+    call_id: UUID | None = None
+    data: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class CascadeEventCreate(BaseModel):
+    """Schema for creating a cascade event."""
+
+    request_id: UUID
+    event_type: CascadeEventType
+    restaurant_id: UUID | None = None
+    call_id: UUID | None = None
+    data: dict = Field(default_factory=dict)
+
+
+# ============================================
+# NOTIFICATION SCHEMAS
+# ============================================
+
+
+NotificationChannel = Literal["sms", "push", "email"]
+NotificationType = Literal[
+    "cascade_started",
+    "restaurant_trying",
+    "reservation_confirmed",
+    "cascade_exhausted",
+    "cascade_cancelled",
+]
+NotificationStatus = Literal["pending", "sent", "failed"]
+
+
+class Notification(BaseModel):
+    """Schema for a notification record."""
+
+    id: UUID
+    request_id: UUID
+    user_id: UUID | None = None
+    channel: NotificationChannel = "sms"
+    notification_type: NotificationType
+    message: str
+    status: NotificationStatus = "pending"
+    sent_at: datetime | None = None
+    created_at: datetime
+
+
+class NotificationCreate(BaseModel):
+    """Schema for creating a notification."""
+
+    request_id: UUID
+    user_id: UUID | None = None
+    channel: NotificationChannel = "sms"
+    notification_type: NotificationType
+    message: str
+
+
+# ============================================
+# CASCADE API REQUEST/RESPONSE SCHEMAS
+# ============================================
+
+
+class CascadeStartRequest(BaseModel):
+    """Request to start a cascade for a reservation request."""
+
+    request_id: UUID
+
+
+class CascadeReorderRequest(BaseModel):
+    """Request to reorder restaurants in cascade."""
+
+    request_id: UUID
+    restaurant_order: list[UUID] = Field(..., description="Ordered list of restaurant IDs")
+
+
+class CascadeStatusResponse(BaseModel):
+    """Response for cascade status query."""
+
+    request_id: UUID
+    cascade_status: CascadeStatus
+    current_restaurant_idx: int
+    restaurants: list[RequestRestaurant]
+    recent_events: list[CascadeEvent]
+
+
+class CascadeSSEEvent(BaseModel):
+    """Schema for SSE events pushed to clients."""
+
+    request_id: UUID
+    request_type: str = "reservation"
+    event_type: CascadeEventType
+    restaurant_id: UUID | None = None
+    restaurant_name: str | None = None
+    call_id: UUID | None = None
+    data: dict = Field(default_factory=dict)
+    timestamp: datetime
 
 
 # ============================================

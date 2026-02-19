@@ -126,7 +126,7 @@ async def save_booking(context: CallContext, booking: BookingDetails) -> dict:
         reservation["request_id"] = context["request_id"]
     if context.get("restaurant_id"):
         reservation["restaurant_id"] = context["restaurant_id"]
-    if context.get("user_id"):
+    if context.get("user_id") and context["user_id"] not in ("", "None"):
         reservation["user_id"] = context["user_id"]
 
     logger.info(f"Saving reservation: {reservation}")

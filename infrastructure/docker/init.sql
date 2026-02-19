@@ -97,6 +97,8 @@ CREATE TABLE IF NOT EXISTS calls (
     request_id UUID REFERENCES requests(id),
     restaurant_id UUID REFERENCES restaurants(id),
     status TEXT CHECK (status IN ('ongoing', 'completed', 'failed')),
+    twilio_status TEXT,
+    attempt_number INT NOT NULL DEFAULT 1,
     failure_reason TEXT,
     duration_seconds INT,
     transcript_summary TEXT,
@@ -178,6 +180,34 @@ CREATE TABLE IF NOT EXISTS cancellation_results (
 );
 
 -- ============================================
+-- CASCADE & NOTIFICATION TABLES
+-- ============================================
+
+-- Table: Cascade Events (audit trail for cascade orchestration)
+CREATE TABLE IF NOT EXISTS cascade_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id UUID NOT NULL REFERENCES reservation_requests(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    restaurant_id UUID REFERENCES restaurants(id),
+    call_id UUID REFERENCES calls(id),
+    data JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Table: Notifications (SMS/push sent to users)
+CREATE TABLE IF NOT EXISTS notifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id UUID NOT NULL REFERENCES reservation_requests(id) ON DELETE CASCADE,
+    user_id UUID REFERENCES users(id),
+    channel TEXT NOT NULL DEFAULT 'sms' CHECK (channel IN ('sms', 'push', 'email')),
+    notification_type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed')),
+    sent_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================
 -- INDEXES
 -- ============================================
 
@@ -222,3 +252,16 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 -- Restaurants indexes
 CREATE INDEX IF NOT EXISTS idx_restaurants_phone ON restaurants(phone);
 CREATE INDEX IF NOT EXISTS idx_restaurants_name ON restaurants(name);
+
+-- Cascade events indexes
+CREATE INDEX IF NOT EXISTS idx_cascade_events_request_id ON cascade_events(request_id);
+CREATE INDEX IF NOT EXISTS idx_cascade_events_event_type ON cascade_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_cascade_events_created_at ON cascade_events(created_at);
+
+-- Notifications indexes
+CREATE INDEX IF NOT EXISTS idx_notifications_request_id ON notifications(request_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_status ON notifications(status);
+
+-- Request-Restaurant cascade indexes
+CREATE INDEX IF NOT EXISTS idx_request_restaurants_attempt_status ON request_restaurants(attempt_status);

@@ -1,15 +1,12 @@
-export type CascadeEventType =
-  | "cascade_started"
+import type { CascadeEventType as SharedCascadeEventType } from "@sam/api-contracts";
+
+type LegacyCascadeEventType =
   | "calling_restaurant"
   | "call_completed_success"
   | "call_completed_failure"
-  | "call_no_answer"
-  | "restaurant_skipped"
-  | "cascade_paused"
-  | "cascade_resumed"
-  | "cascade_completed"
-  | "cascade_exhausted"
-  | "cascade_cancelled";
+  | "call_no_answer";
+
+export type CascadeEventType = SharedCascadeEventType | LegacyCascadeEventType;
 
 export type CascadeEvent = {
   event: CascadeEventType;

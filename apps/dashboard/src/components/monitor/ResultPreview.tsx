@@ -9,7 +9,7 @@ export default function ResultPreview({
   events: CascadeEvent[];
   requestType: string;
 }) {
-  const successEvents = events.filter((e) => e.event === "call_completed_success");
+  const successEvents = events.filter((e) => e.event === "call_completed_success" || e.event === "restaurant_succeeded");
 
   if (successEvents.length === 0) return null;
 

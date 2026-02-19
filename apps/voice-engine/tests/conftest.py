@@ -88,6 +88,7 @@ class MockQueryBuilder:
         self._filters = {}
         self._data = None
         self._select_fields = "*"
+        self._order_by: list[tuple[str, bool]] = []
 
     def select(self, fields: str = "*"):
         self._select_fields = fields
@@ -103,6 +104,10 @@ class MockQueryBuilder:
 
     def eq(self, field: str, value):
         self._filters[field] = value
+        return self
+
+    def order(self, column: str, ascending: bool = True):
+        self._order_by.append((column, ascending))
         return self
 
     def execute(self):
@@ -130,16 +135,22 @@ class MockQueryBuilder:
             result.data = updated
 
         else:
-            # SELECT operation
+            # SELECT operation — return copies to prevent mutation of stored data
+            # (mirrors real Supabase which returns fresh dicts from JSON)
             table_data = self._store.get(self._table, [])
             if self._filters:
                 filtered = [
-                    row for row in table_data
+                    {**row} for row in table_data
                     if all(row.get(k) == v for k, v in self._filters.items())
                 ]
-                result.data = filtered
             else:
-                result.data = table_data
+                filtered = [{**row} for row in table_data]
+
+            # Apply ordering
+            for col, asc in reversed(self._order_by):
+                filtered.sort(key=lambda r: r.get(col, 0), reverse=not asc)
+
+            result.data = filtered
 
         return result
 
@@ -393,6 +404,18 @@ class MockGeminiClient:
             resp.response = result
             await self.session.send_tool_response([resp])
 
+    def get_received_audio(self) -> list[bytes]:
+        """Get all audio chunks sent to Gemini."""
+        return self._mock_session._received_audio
+
+    def get_received_text(self) -> list[str]:
+        """Get all text messages sent to Gemini."""
+        return self._mock_session._received_text
+
+    def get_tool_responses(self) -> list[dict]:
+        """Get all tool responses sent back to Gemini."""
+        return self._tool_responses
+
     async def close(self):
         """Mock close."""
         self.session = None
@@ -490,6 +513,19 @@ def generate_mulaw_silence(duration_ms: int = 100, sample_rate: int = 8000) -> b
     return bytes([0xFF] * num_samples)
 
 
+def generate_pcm_tone(duration_ms: int = 100, sample_rate: int = 16000, frequency: int = 440) -> bytes:
+    """Generate a simple sine wave tone as 16-bit PCM audio."""
+    import math
+    import struct
+
+    num_samples = int(sample_rate * duration_ms / 1000)
+    samples = []
+    for i in range(num_samples):
+        value = int(16000 * math.sin(2 * math.pi * frequency * i / sample_rate))
+        samples.append(struct.pack("<h", value))
+    return b"".join(samples)
+
+
 def generate_pcm_silence(duration_ms: int = 100, sample_rate: int = 16000) -> bytes:
     """Generate silent 16-bit PCM audio."""
     num_samples = int(sample_rate * duration_ms / 1000)
@@ -532,6 +568,25 @@ def booking_args():
         "party_size": 4,
         "confirmation_code": "CONF123",
         "notes": "Window seat requested",
+    }
+
+
+@pytest.fixture
+def end_call_args():
+    """Provide sample end call arguments."""
+    return {
+        "reason": "User declined alternative time",
+        "call_summary": "Called restaurant, offered 7pm but user declined.",
+    }
+
+
+@pytest.fixture
+def no_availability_args():
+    """Provide sample no-availability arguments."""
+    return {
+        "reason": "Fully booked for the requested time",
+        "alternative_offered": "8:30 PM available",
+        "should_try_alternative": True,
     }
 
 

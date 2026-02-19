@@ -36,10 +36,12 @@ class TestSuccessfulBookingFlow:
         handler = TwilioMediaHandler(
             websocket=mock_websocket,
             db=mock_db,
-            request_id="req-123",
-            restaurant_id="rest-456",
-            restaurant_name="Test Restaurant",
-            user_id="user-789",
+            call_context={
+                "request_id": "req-123",
+                "restaurant_id": "rest-456",
+                "restaurant_name": "Test Restaurant",
+                "user_id": "user-789",
+            },
         )
         return handler
 
@@ -176,7 +178,7 @@ class TestSuccessfulBookingFlow:
         handler = TwilioMediaHandler(
             websocket=mock_websocket,
             db=mock_db,
-            restaurant_name="Test Restaurant",
+            call_context={"restaurant_name": "Test Restaurant"},
         )
 
         # Create call record first

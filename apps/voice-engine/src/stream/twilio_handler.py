@@ -219,7 +219,8 @@ class TwilioMediaHandler:
                     logger.info("Outbound call — sending text prompt to trigger Gemini greeting")
                     await gemini.send_text(
                         "The restaurant has answered the phone. Introduce yourself now "
-                        "and state the reservation request as specified in your instructions."
+                        "as the concierge caller (not restaurant staff), and state the "
+                        "reservation request exactly as specified in your instructions."
                     )
                 else:
                     logger.info("Inbound call — waiting for caller audio to trigger Gemini via VAD")

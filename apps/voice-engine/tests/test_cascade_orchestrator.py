@@ -95,6 +95,21 @@ class TestCascadeStateMachine:
         req = make_request(mock_db)
         assert req["cascade_status"] == "idle"
 
+    def test_load_request_includes_user_name_when_available(self, mock_db):
+        from src.orchestrator.cascade import CascadeOrchestrator
+
+        req = make_request(mock_db)
+        mock_db.table("users").insert({
+            "id": req["user_id"],
+            "name": "Alex Guest",
+        }).execute()
+
+        orch = CascadeOrchestrator(mock_db, req["id"])
+        loaded = orch._load_request()
+
+        assert loaded is not None
+        assert loaded["user_name"] == "Alex Guest"
+
     @pytest.mark.asyncio
     async def test_start_sets_running(self, mock_db):
         from src.orchestrator.cascade import CascadeOrchestrator

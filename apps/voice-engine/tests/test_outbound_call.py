@@ -197,6 +197,8 @@ class TestPromptGeneration:
         assert "20:00" in prompt
         assert "outdoor seating" in prompt
         assert "save_booking" in prompt
+        assert "AI concierge" in prompt
+        assert "on behalf of John Doe" in prompt
 
     def test_build_outbound_prompt_no_special_requests(self):
         """Test outbound prompt handles empty special requests."""
@@ -215,6 +217,23 @@ class TestPromptGeneration:
         )
 
         assert "None" in prompt  # Default for empty special_requests
+
+    def test_build_cascade_prompt_uses_guest_reference_fallback(self):
+        """Test cascade prompt includes explicit guest reference when no user name is provided."""
+        from src.brain.prompts import build_cascade_reservation_prompt
+
+        prompt = build_cascade_reservation_prompt(
+            party_size=2,
+            preferred_date="2026-03-01",
+            time_range_start="18:00",
+            time_range_end="20:00",
+            restaurant_name="Chez Marie",
+            contact_phone="+15551234567",
+            special_requests=None,
+        )
+
+        assert "AI concierge" in prompt
+        assert "on behalf of the guest at +15551234567" in prompt
 
 
 class TestGeminiClientPrompt:

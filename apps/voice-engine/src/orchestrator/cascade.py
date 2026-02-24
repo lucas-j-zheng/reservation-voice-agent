@@ -398,6 +398,7 @@ class CascadeOrchestrator:
                 restaurant_name=restaurant["name"],
                 contact_phone=req.get("contact_phone", ""),
                 special_requests=req.get("special_requests"),
+                user_name=req.get("user_name"),
             )
 
             # Store call context so the WebSocket handler can retrieve it
@@ -407,6 +408,7 @@ class CascadeOrchestrator:
                 "restaurant_id": str(restaurant.get("id", "")),
                 "restaurant_name": restaurant["name"],
                 "user_id": str(req["user_id"]) if req.get("user_id") else "",
+                "user_name": req.get("user_name", ""),
                 "party_size": req.get("party_size", 2),
                 "requested_date": str(req.get("requested_date", "")),
                 "time_range_start": req.get("time_range_start", ""),
@@ -598,6 +600,18 @@ class CascadeOrchestrator:
         ).execute()
         if details.data:
             req.update(details.data[0])
+
+        # Attach user name for concierge-style prompt identity when available.
+        user_id = req.get("user_id")
+        if user_id:
+            try:
+                user_result = self._db.table("users").select("name").eq(
+                    "id", user_id
+                ).execute()
+                if user_result.data and user_result.data[0].get("name"):
+                    req["user_name"] = user_result.data[0]["name"]
+            except Exception as e:
+                logger.warning(f"Failed to load user name for request {self._request_id}: {e}")
 
         return req
 
